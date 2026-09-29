@@ -1,0 +1,1570 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Eonun · 证书验证</title>
+<script>/* ---------- 内置公钥（可公开 · 仅用于验签 · 换钥时在此追加，勿删旧钥） ---------- */
+const PUBLIC_KEYS = [
+  "04cb14e2205f64f864ff06a27d8d3d0999d3147fd2c691b94ecb677584760f9ccf991b5d3534210ee6c96a9c96103114bfa2ddbd50cc82a15d820d821cd2e474a6"
+];
+/* ---------- 加密约定（与登记程序严格一致，改动必须两边同步） ----------
+   共享密钥 = NOBLE_P256.getSharedSecret(学生私钥sk, 教师公钥)  → 33 字节（压缩格式）
+   AES 密钥 = SHA-256(共享密钥原始字节)
+   .bin 文件 = [12 字节 IV][AES-GCM 密文+校验码]，平铺在仓库根目录
+   文件名   = SHA256(学生公钥小写 hex 字符串) 的 hex + ".bin"
+   明文 JSON = { cardInfo, nodes, current, message }
+   v2 二维码负载 = 编号.签名.学生私钥（点分隔，跟在验证页 URL 的 # 后面）
+----------------------------------------------------------------------- */
+
+/* ---------- SHA-256 ---------- */
+function sha256(ascii) {
+  function rr(v,a){return (v>>>a)|(v<<(32-a));}
+  var mp=Math.pow, mw=mp(2,32), result='';
+  var words=[], bitLen=ascii.length*8;
+  var hash=sha256.h=sha256.h||[], k=sha256.k=sha256.k||[];
+  var pc=k.length, comp={};
+  for (var c=2; pc<64; c++) {
+    if (!comp[c]) {
+      for (var i=0;i<313;i+=c) comp[i]=c;
+      hash[pc]=(mp(c,.5)*mw)|0;
+      k[pc++]=(mp(c,1/3)*mw)|0;
+    }
+  }
+  ascii+='\x80';
+  while (ascii.length%64-56) ascii+='\x00';
+  for (var i=0;i<ascii.length;i++) {
+    var j=ascii.charCodeAt(i); if (j>>8) return;
+    words[i>>2]|=j<<((3-i)%4)*8;
+  }
+  words[words.length]=(bitLen/mw)|0;
+  words[words.length]=bitLen;
+  for (var j=0;j<words.length;) {
+    var w=words.slice(j,j+=16);
+    var old=hash.slice(0,8);
+    for (var i=0;i<64;i++) {
+      var w15=w[i-15], w2=w[i-2];
+      var a=hash[0], e=hash[4];
+      var t1=hash[7]
+        +(rr(e,6)^rr(e,11)^rr(e,25))
+        +((e&hash[5])^(~e&hash[6]))
+        +k[i]
+        +(w[i]=(i<16)?w[i]:(w[i-16]+(rr(w15,7)^rr(w15,18)^(w15>>>3))+w[i-7]+(rr(w2,17)^rr(w2,19)^(w2>>>10)))|0);
+      var t2=(rr(a,2)^rr(a,13)^rr(a,22))+((a&hash[1])^(a&hash[2])^(hash[1]&hash[2]));
+      hash=[(t1+t2)|0].concat(hash);
+      hash[4]=(hash[4]+t1)|0;
+    }
+    for (var i=0;i<8;i++) hash[i]=(hash[i]+old[i])|0;
+  }
+  for (var i=0;i<8;i++) {
+    for (var j=3;j+1;j--) {
+      var b=(hash[i]>>(j*8))&255;
+      result+=((b<16)?'0':'')+b.toString(16);
+    }
+  }
+  return result;
+}
+
+/* ---------- 签名引擎：@noble/curves p256 v1.8.1（业界安全审计库，内嵌 · 离线可用 · 替换原手写实现） ---------- */
+/* esm.sh - @noble/curves@1.8.1/p256 */
+var Ze=Object.defineProperty;var Me=(t,n)=>{for(var e in n)Ze(t,e,{get:n[e],enumerable:!0})};function ue(t){if(!Number.isSafeInteger(t)||t<0)throw new Error("positive integer expected, got "+t)}function je(t){return t instanceof Uint8Array||ArrayBuffer.isView(t)&&t.constructor.name==="Uint8Array"}function yt(t,...n){if(!je(t))throw new Error("Uint8Array expected");if(n.length>0&&!n.includes(t.length))throw new Error("Uint8Array expected of length "+n+", got length="+t.length)}function le(t){if(typeof t!="function"||typeof t.create!="function")throw new Error("Hash should be wrapped by utils.wrapConstructor");ue(t.outputLen),ue(t.blockLen)}function bt(t,n=!0){if(t.destroyed)throw new Error("Hash instance has been destroyed");if(n&&t.finished)throw new Error("Hash#digest() has already been called")}function de(t,n){yt(t);let e=n.outputLen;if(t.length<e)throw new Error("digestInto() expects output buffer of length at least "+e)}var ut=typeof globalThis=="object"&&"crypto"in globalThis?globalThis.crypto:void 0;function _t(t){return new DataView(t.buffer,t.byteOffset,t.byteLength)}function G(t,n){return t<<32-n|t>>>n}function ze(t){if(typeof t!="string")throw new Error("utf8ToBytes expected string, got "+typeof t);return new Uint8Array(new TextEncoder().encode(t))}function At(t){return typeof t=="string"&&(t=ze(t)),yt(t),t}function he(...t){let n=0;for(let r=0;r<t.length;r++){let o=t[r];yt(o),n+=o.length}let e=new Uint8Array(n);for(let r=0,o=0;r<t.length;r++){let i=t[r];e.set(i,o),o+=i.length}return e}var Et=class{clone(){return this._cloneInto()}};function pe(t){let n=r=>t().update(At(r)).digest(),e=t();return n.outputLen=e.outputLen,n.blockLen=e.blockLen,n.create=()=>t(),n}function ge(t=32){if(ut&&typeof ut.getRandomValues=="function")return ut.getRandomValues(new Uint8Array(t));if(ut&&typeof ut.randomBytes=="function")return ut.randomBytes(t);throw new Error("crypto.getRandomValues must be defined")}function De(t,n,e,r){if(typeof t.setBigUint64=="function")return t.setBigUint64(n,e,r);let o=BigInt(32),i=BigInt(4294967295),c=Number(e>>o&i),f=Number(e&i),s=r?4:0,u=r?0:4;t.setUint32(n+s,c,r),t.setUint32(n+u,f,r)}function we(t,n,e){return t&n^~t&e}function me(t,n,e){return t&n^t&e^n&e}var qt=class extends Et{constructor(n,e,r,o){super(),this.blockLen=n,this.outputLen=e,this.padOffset=r,this.isLE=o,this.finished=!1,this.length=0,this.pos=0,this.destroyed=!1,this.buffer=new Uint8Array(n),this.view=_t(this.buffer)}update(n){bt(this);let{view:e,buffer:r,blockLen:o}=this;n=At(n);let i=n.length;for(let c=0;c<i;){let f=Math.min(o-this.pos,i-c);if(f===o){let s=_t(n);for(;o<=i-c;c+=o)this.process(s,c);continue}r.set(n.subarray(c,c+f),this.pos),this.pos+=f,c+=f,this.pos===o&&(this.process(e,0),this.pos=0)}return this.length+=n.length,this.roundClean(),this}digestInto(n){bt(this),de(n,this),this.finished=!0;let{buffer:e,view:r,blockLen:o,isLE:i}=this,{pos:c}=this;e[c++]=128,this.buffer.subarray(c).fill(0),this.padOffset>o-c&&(this.process(r,0),c=0);for(let l=c;l<o;l++)e[l]=0;De(r,o-8,BigInt(this.length*8),i),this.process(r,0);let f=_t(n),s=this.outputLen;if(s%4)throw new Error("_sha2: outputLen should be aligned to 32bit");let u=s/4,x=this.get();if(u>x.length)throw new Error("_sha2: outputLen bigger than state");for(let l=0;l<u;l++)f.setUint32(4*l,x[l],i)}digest(){let{buffer:n,outputLen:e}=this;this.digestInto(n);let r=n.slice(0,e);return this.destroy(),r}_cloneInto(n){n||(n=new this.constructor),n.set(...this.get());let{blockLen:e,buffer:r,length:o,finished:i,destroyed:c,pos:f}=this;return n.length=o,n.pos=f,n.finished=i,n.destroyed=c,o%e&&n.buffer.set(r),n}};var Ye=new Uint32Array([1116352408,1899447441,3049323471,3921009573,961987163,1508970993,2453635748,2870763221,3624381080,310598401,607225278,1426881987,1925078388,2162078206,2614888103,3248222580,3835390401,4022224774,264347078,604807628,770255983,1249150122,1555081692,1996064986,2554220882,2821834349,2952996808,3210313671,3336571891,3584528711,113926993,338241895,666307205,773529912,1294757372,1396182291,1695183700,1986661051,2177026350,2456956037,2730485921,2820302411,3259730800,3345764771,3516065817,3600352804,4094571909,275423344,430227734,506948616,659060556,883997877,958139571,1322822218,1537002063,1747873779,1955562222,2024104815,2227730452,2361852424,2428436474,2756734187,3204031479,3329325298]),et=new Uint32Array([1779033703,3144134277,1013904242,2773480762,1359893119,2600822924,528734635,1541459225]),nt=new Uint32Array(64),Kt=class extends qt{constructor(){super(64,32,8,!1),this.A=et[0]|0,this.B=et[1]|0,this.C=et[2]|0,this.D=et[3]|0,this.E=et[4]|0,this.F=et[5]|0,this.G=et[6]|0,this.H=et[7]|0}get(){let{A:n,B:e,C:r,D:o,E:i,F:c,G:f,H:s}=this;return[n,e,r,o,i,c,f,s]}set(n,e,r,o,i,c,f,s){this.A=n|0,this.B=e|0,this.C=r|0,this.D=o|0,this.E=i|0,this.F=c|0,this.G=f|0,this.H=s|0}process(n,e){for(let l=0;l<16;l++,e+=4)nt[l]=n.getUint32(e,!1);for(let l=16;l<64;l++){let h=nt[l-15],w=nt[l-2],A=G(h,7)^G(h,18)^h>>>3,m=G(w,17)^G(w,19)^w>>>10;nt[l]=m+nt[l-7]+A+nt[l-16]|0}let{A:r,B:o,C:i,D:c,E:f,F:s,G:u,H:x}=this;for(let l=0;l<64;l++){let h=G(f,6)^G(f,11)^G(f,25),w=x+h+we(f,s,u)+Ye[l]+nt[l]|0,m=(G(r,2)^G(r,13)^G(r,22))+me(r,o,i)|0;x=u,u=s,s=f,f=c+w|0,c=i,i=o,o=r,r=w+m|0}r=r+this.A|0,o=o+this.B|0,i=i+this.C|0,c=c+this.D|0,f=f+this.E|0,s=s+this.F|0,u=u+this.G|0,x=x+this.H|0,this.set(r,o,i,c,f,s,u,x)}roundClean(){nt.fill(0)}destroy(){this.set(0,0,0,0,0,0,0,0),this.buffer.fill(0)}};var Wt=pe(()=>new Kt);var Nt=class extends Et{constructor(n,e){super(),this.finished=!1,this.destroyed=!1,le(n);let r=At(e);if(this.iHash=n.create(),typeof this.iHash.update!="function")throw new Error("Expected instance of class which extends utils.Hash");this.blockLen=this.iHash.blockLen,this.outputLen=this.iHash.outputLen;let o=this.blockLen,i=new Uint8Array(o);i.set(r.length>o?n.create().update(r).digest():r);for(let c=0;c<i.length;c++)i[c]^=54;this.iHash.update(i),this.oHash=n.create();for(let c=0;c<i.length;c++)i[c]^=106;this.oHash.update(i),i.fill(0)}update(n){return bt(this),this.iHash.update(n),this}digestInto(n){bt(this),yt(n,this.outputLen),this.finished=!0,this.iHash.digestInto(n),this.oHash.update(n),this.oHash.digestInto(n),this.destroy()}digest(){let n=new Uint8Array(this.oHash.outputLen);return this.digestInto(n),n}_cloneInto(n){n||(n=Object.create(Object.getPrototypeOf(this),{}));let{oHash:e,iHash:r,finished:o,destroyed:i,blockLen:c,outputLen:f}=this;return n=n,n.finished=o,n.destroyed=i,n.blockLen=c,n.outputLen=f,n.oHash=e._cloneInto(n.oHash),n.iHash=r._cloneInto(n.iHash),n}destroy(){this.destroyed=!0,this.oHash.destroy(),this.iHash.destroy()}},Gt=(t,n,e)=>new Nt(t,n).update(e).digest();Gt.create=(t,n)=>new Nt(t,n);var Ft={};Me(Ft,{aInRange:()=>it,abool:()=>lt,abytes:()=>K,bitGet:()=>Xe,bitLen:()=>Jt,bitMask:()=>It,bitSet:()=>Qe,bytesToHex:()=>dt,bytesToNumberBE:()=>P,bytesToNumberLE:()=>Ht,concatBytes:()=>Y,createHmacDrbg:()=>$t,ensureBytes:()=>D,equalBytes:()=>Pe,hexToBytes:()=>pt,hexToNumber:()=>Qt,inRange:()=>Ot,isBytes:()=>rt,memoized:()=>kt,notImplemented:()=>$e,numberToBytesBE:()=>ot,numberToBytesLE:()=>Ct,numberToHexUnpadded:()=>ht,numberToVarBytesBE:()=>Ge,utf8ToBytes:()=>St,validateObject:()=>Q});var Ut=BigInt(0),Rt=BigInt(1),Ke=BigInt(2);function rt(t){return t instanceof Uint8Array||ArrayBuffer.isView(t)&&t.constructor.name==="Uint8Array"}function K(t){if(!rt(t))throw new Error("Uint8Array expected")}function lt(t,n){if(typeof n!="boolean")throw new Error(t+" boolean expected, got "+n)}var We=Array.from({length:256},(t,n)=>n.toString(16).padStart(2,"0"));function dt(t){K(t);let n="";for(let e=0;e<t.length;e++)n+=We[t[e]];return n}function ht(t){let n=t.toString(16);return n.length&1?"0"+n:n}function Qt(t){if(typeof t!="string")throw new Error("hex string expected, got "+typeof t);return t===""?Ut:BigInt("0x"+t)}var $={_0:48,_9:57,A:65,F:70,a:97,f:102};function xe(t){if(t>=$._0&&t<=$._9)return t-$._0;if(t>=$.A&&t<=$.F)return t-($.A-10);if(t>=$.a&&t<=$.f)return t-($.a-10)}function pt(t){if(typeof t!="string")throw new Error("hex string expected, got "+typeof t);let n=t.length,e=n/2;if(n%2)throw new Error("hex string expected, got unpadded hex of length "+n);let r=new Uint8Array(e);for(let o=0,i=0;o<e;o++,i+=2){let c=xe(t.charCodeAt(i)),f=xe(t.charCodeAt(i+1));if(c===void 0||f===void 0){let s=t[i]+t[i+1];throw new Error('hex string expected, got non-hex character "'+s+'" at index '+i)}r[o]=c*16+f}return r}function P(t){return Qt(dt(t))}function Ht(t){return K(t),Qt(dt(Uint8Array.from(t).reverse()))}function ot(t,n){return pt(t.toString(16).padStart(n*2,"0"))}function Ct(t,n){return ot(t,n).reverse()}function Ge(t){return pt(ht(t))}function D(t,n,e){let r;if(typeof n=="string")try{r=pt(n)}catch(i){throw new Error(t+" must be hex string or Uint8Array, cause: "+i)}else if(rt(n))r=Uint8Array.from(n);else throw new Error(t+" must be hex string or Uint8Array");let o=r.length;if(typeof e=="number"&&o!==e)throw new Error(t+" of length "+e+" expected, got "+o);return r}function Y(...t){let n=0;for(let r=0;r<t.length;r++){let o=t[r];K(o),n+=o.length}let e=new Uint8Array(n);for(let r=0,o=0;r<t.length;r++){let i=t[r];e.set(i,o),o+=i.length}return e}function Pe(t,n){if(t.length!==n.length)return!1;let e=0;for(let r=0;r<t.length;r++)e|=t[r]^n[r];return e===0}function St(t){if(typeof t!="string")throw new Error("string expected");return new Uint8Array(new TextEncoder().encode(t))}var Pt=t=>typeof t=="bigint"&&Ut<=t;function Ot(t,n,e){return Pt(t)&&Pt(n)&&Pt(e)&&n<=t&&t<e}function it(t,n,e,r){if(!Ot(n,e,r))throw new Error("expected valid "+t+": "+e+" <= n < "+r+", got "+n)}function Jt(t){let n;for(n=0;t>Ut;t>>=Rt,n+=1);return n}function Xe(t,n){return t>>BigInt(n)&Rt}function Qe(t,n,e){return t|(e?Rt:Ut)<<BigInt(n)}var It=t=>(Ke<<BigInt(t-1))-Rt,Xt=t=>new Uint8Array(t),ye=t=>Uint8Array.from(t);function $t(t,n,e){if(typeof t!="number"||t<2)throw new Error("hashLen must be a number");if(typeof n!="number"||n<2)throw new Error("qByteLen must be a number");if(typeof e!="function")throw new Error("hmacFn must be a function");let r=Xt(t),o=Xt(t),i=0,c=()=>{r.fill(1),o.fill(0),i=0},f=(...l)=>e(o,r,...l),s=(l=Xt())=>{o=f(ye([0]),l),r=f(),l.length!==0&&(o=f(ye([1]),l),r=f())},u=()=>{if(i++>=1e3)throw new Error("drbg: tried 1000 values");let l=0,h=[];for(;l<n;){r=f();let w=r.slice();h.push(w),l+=r.length}return Y(...h)};return(l,h)=>{c(),s(l);let w;for(;!(w=h(u()));)s();return c(),w}}var Je={bigint:t=>typeof t=="bigint",function:t=>typeof t=="function",boolean:t=>typeof t=="boolean",string:t=>typeof t=="string",stringOrUint8Array:t=>typeof t=="string"||rt(t),isSafeInteger:t=>Number.isSafeInteger(t),array:t=>Array.isArray(t),field:(t,n)=>n.Fp.isValid(t),hash:t=>typeof t=="function"&&Number.isSafeInteger(t.outputLen)};function Q(t,n,e={}){let r=(o,i,c)=>{let f=Je[i];if(typeof f!="function")throw new Error("invalid validator function");let s=t[o];if(!(c&&s===void 0)&&!f(s,t))throw new Error("param "+String(o)+" is invalid. Expected "+i+", got "+s)};for(let[o,i]of Object.entries(n))r(o,i,!1);for(let[o,i]of Object.entries(e))r(o,i,!0);return t}var $e=()=>{throw new Error("not implemented")};function kt(t){let n=new WeakMap;return(e,...r)=>{let o=n.get(e);if(o!==void 0)return o;let i=t(e,...r);return n.set(e,i),i}}var C=BigInt(0),R=BigInt(1),gt=BigInt(2),Fe=BigInt(3),te=BigInt(4),be=BigInt(5),Ee=BigInt(8),tn=BigInt(9),en=BigInt(16);function Z(t,n){let e=t%n;return e>=C?e:n+e}function nn(t,n,e){if(n<C)throw new Error("invalid exponent, negatives unsupported");if(e<=C)throw new Error("invalid modulus");if(e===R)return C;let r=R;for(;n>C;)n&R&&(r=r*t%e),t=t*t%e,n>>=R;return r}function Vt(t,n){if(t===C)throw new Error("invert: expected non-zero number");if(n<=C)throw new Error("invert: expected positive modulus, got "+n);let e=Z(t,n),r=n,o=C,i=R,c=R,f=C;for(;e!==C;){let u=r/e,x=r%e,l=o-c*u,h=i-f*u;r=e,e=x,o=c,i=f,c=l,f=h}if(r!==R)throw new Error("invert: does not exist");return Z(o,n)}function rn(t){let n=(t-R)/gt,e,r,o;for(e=t-R,r=0;e%gt===C;e/=gt,r++);for(o=gt;o<t&&nn(o,n,t)!==t-R;o++)if(o>1e3)throw new Error("Cannot find square root: likely non-prime P");if(r===1){let c=(t+R)/te;return function(s,u){let x=s.pow(u,c);if(!s.eql(s.sqr(x),u))throw new Error("Cannot find square root");return x}}let i=(e+R)/gt;return function(f,s){if(f.pow(s,n)===f.neg(f.ONE))throw new Error("Cannot find square root");let u=r,x=f.pow(f.mul(f.ONE,o),e),l=f.pow(s,i),h=f.pow(s,e);for(;!f.eql(h,f.ONE);){if(f.eql(h,f.ZERO))return f.ZERO;let w=1;for(let m=f.sqr(h);w<u&&!f.eql(m,f.ONE);w++)m=f.sqr(m);let A=f.pow(x,R<<BigInt(u-w-1));x=f.sqr(A),l=f.mul(l,A),h=f.mul(h,x),u=w}return l}}function on(t){if(t%te===Fe){let n=(t+R)/te;return function(r,o){let i=r.pow(o,n);if(!r.eql(r.sqr(i),o))throw new Error("Cannot find square root");return i}}if(t%Ee===be){let n=(t-be)/Ee;return function(r,o){let i=r.mul(o,gt),c=r.pow(i,n),f=r.mul(o,c),s=r.mul(r.mul(f,gt),c),u=r.mul(f,r.sub(s,r.ONE));if(!r.eql(r.sqr(u),o))throw new Error("Cannot find square root");return u}}return t%en,rn(t)}var sn=["create","isValid","is0","neg","inv","sqrt","sqr","eql","add","sub","mul","pow","div","addN","subN","mulN","sqrN"];function Zt(t){let n={ORDER:"bigint",MASK:"bigint",BYTES:"isSafeInteger",BITS:"isSafeInteger"},e=sn.reduce((r,o)=>(r[o]="function",r),n);return Q(t,e)}function cn(t,n,e){if(e<C)throw new Error("invalid exponent, negatives unsupported");if(e===C)return t.ONE;if(e===R)return n;let r=t.ONE,o=n;for(;e>C;)e&R&&(r=t.mul(r,o)),o=t.sqr(o),e>>=R;return r}function fn(t,n){let e=new Array(n.length),r=n.reduce((i,c,f)=>t.is0(c)?i:(e[f]=i,t.mul(i,c)),t.ONE),o=t.inv(r);return n.reduceRight((i,c,f)=>t.is0(c)?i:(e[f]=t.mul(i,e[f]),t.mul(i,c)),o),e}function ee(t,n){let e=n!==void 0?n:t.toString(2).length,r=Math.ceil(e/8);return{nBitLength:e,nByteLength:r}}function Mt(t,n,e=!1,r={}){if(t<=C)throw new Error("invalid field: expected ORDER > 0, got "+t);let{nBitLength:o,nByteLength:i}=ee(t,n);if(i>2048)throw new Error("invalid field: expected ORDER of <= 2048 bytes");let c,f=Object.freeze({ORDER:t,isLE:e,BITS:o,BYTES:i,MASK:It(o),ZERO:C,ONE:R,create:s=>Z(s,t),isValid:s=>{if(typeof s!="bigint")throw new Error("invalid field element: expected bigint, got "+typeof s);return C<=s&&s<t},is0:s=>s===C,isOdd:s=>(s&R)===R,neg:s=>Z(-s,t),eql:(s,u)=>s===u,sqr:s=>Z(s*s,t),add:(s,u)=>Z(s+u,t),sub:(s,u)=>Z(s-u,t),mul:(s,u)=>Z(s*u,t),pow:(s,u)=>cn(f,s,u),div:(s,u)=>Z(s*Vt(u,t),t),sqrN:s=>s*s,addN:(s,u)=>s+u,subN:(s,u)=>s-u,mulN:(s,u)=>s*u,inv:s=>Vt(s,t),sqrt:r.sqrt||(s=>(c||(c=on(t)),c(f,s))),invertBatch:s=>fn(f,s),cmov:(s,u,x)=>x?u:s,toBytes:s=>e?Ct(s,i):ot(s,i),fromBytes:s=>{if(s.length!==i)throw new Error("Field.fromBytes: expected "+i+" bytes, got "+s.length);return e?Ht(s):P(s)}});return Object.freeze(f)}function Be(t){if(typeof t!="bigint")throw new Error("field order must be bigint");let n=t.toString(2).length;return Math.ceil(n/8)}function ne(t){let n=Be(t);return n+Math.ceil(n/2)}function ve(t,n,e=!1){let r=t.length,o=Be(n),i=ne(n);if(r<16||r<i||r>1024)throw new Error("expected "+i+"-1024 bytes of input, got "+r);let c=e?Ht(t):P(t),f=Z(c,n-R)+R;return e?Ct(f,o):ot(f,o)}var Ae=BigInt(0),jt=BigInt(1);function re(t,n){let e=n.negate();return t?e:n}function Se(t,n){if(!Number.isSafeInteger(t)||t<=0||t>n)throw new Error("invalid window size, expected [1.."+n+"], got W="+t)}function oe(t,n){Se(t,n);let e=Math.ceil(n/t)+1,r=2**(t-1);return{windows:e,windowSize:r}}function an(t,n){if(!Array.isArray(t))throw new Error("array expected");t.forEach((e,r)=>{if(!(e instanceof n))throw new Error("invalid point at index "+r)})}function un(t,n){if(!Array.isArray(t))throw new Error("array of scalars expected");t.forEach((e,r)=>{if(!n.isValid(e))throw new Error("invalid scalar at index "+r)})}var ie=new WeakMap,Oe=new WeakMap;function se(t){return Oe.get(t)||1}function Ie(t,n){return{constTimeNegate:re,hasPrecomputes(e){return se(e)!==1},unsafeLadder(e,r,o=t.ZERO){let i=e;for(;r>Ae;)r&jt&&(o=o.add(i)),i=i.double(),r>>=jt;return o},precomputeWindow(e,r){let{windows:o,windowSize:i}=oe(r,n),c=[],f=e,s=f;for(let u=0;u<o;u++){s=f,c.push(s);for(let x=1;x<i;x++)s=s.add(f),c.push(s);f=s.double()}return c},wNAF(e,r,o){let{windows:i,windowSize:c}=oe(e,n),f=t.ZERO,s=t.BASE,u=BigInt(2**e-1),x=2**e,l=BigInt(e);for(let h=0;h<i;h++){let w=h*c,A=Number(o&u);o>>=l,A>c&&(A-=x,o+=jt);let m=w,a=w+Math.abs(A)-1,d=h%2!==0,g=A<0;A===0?s=s.add(re(d,r[m])):f=f.add(re(g,r[a]))}return{p:f,f:s}},wNAFUnsafe(e,r,o,i=t.ZERO){let{windows:c,windowSize:f}=oe(e,n),s=BigInt(2**e-1),u=2**e,x=BigInt(e);for(let l=0;l<c;l++){let h=l*f;if(o===Ae)break;let w=Number(o&s);if(o>>=x,w>f&&(w-=u,o+=jt),w===0)continue;let A=r[h+Math.abs(w)-1];w<0&&(A=A.negate()),i=i.add(A)}return i},getPrecomputes(e,r,o){let i=ie.get(r);return i||(i=this.precomputeWindow(r,e),e!==1&&ie.set(r,o(i))),i},wNAFCached(e,r,o){let i=se(e);return this.wNAF(i,this.getPrecomputes(i,e,o),r)},wNAFCachedUnsafe(e,r,o,i){let c=se(e);return c===1?this.unsafeLadder(e,r,i):this.wNAFUnsafe(c,this.getPrecomputes(c,e,o),r,i)},setWindowSize(e,r){Se(r,n),Oe.set(e,r),ie.delete(e)}}}function Te(t,n,e,r){if(an(e,t),un(r,n),e.length!==r.length)throw new Error("arrays of points and scalars must have equal length");let o=t.ZERO,i=Jt(BigInt(e.length)),c=i>12?i-3:i>4?i-2:i?2:1,f=(1<<c)-1,s=new Array(f+1).fill(o),u=Math.floor((n.BITS-1)/c)*c,x=o;for(let l=u;l>=0;l-=c){s.fill(o);for(let w=0;w<r.length;w++){let A=r[w],m=Number(A>>BigInt(l)&BigInt(f));s[m]=s[m].add(e[w])}let h=o;for(let w=s.length-1,A=o;w>0;w--)A=A.add(s[w]),h=h.add(A);if(x=x.add(h),l!==0)for(let w=0;w<c;w++)x=x.double()}return x}function ce(t){return Zt(t.Fp),Q(t,{n:"bigint",h:"bigint",Gx:"field",Gy:"field"},{nBitLength:"isSafeInteger",nByteLength:"isSafeInteger"}),Object.freeze({...ee(t.n,t.nBitLength),...t,p:t.Fp.ORDER})}function Le(t){t.lowS!==void 0&&lt("lowS",t.lowS),t.prehash!==void 0&&lt("prehash",t.prehash)}function ln(t){let n=ce(t);Q(n,{a:"field",b:"field"},{allowedPrivateKeyLengths:"array",wrapPrivateKey:"boolean",isTorsionFree:"function",clearCofactor:"function",allowInfinityPoint:"boolean",fromBytes:"function",toBytes:"function"});let{endo:e,Fp:r,a:o}=n;if(e){if(!r.eql(o,r.ZERO))throw new Error("invalid endomorphism, can only be defined for Koblitz curves that have a=0");if(typeof e!="object"||typeof e.beta!="bigint"||typeof e.splitScalar!="function")throw new Error("invalid endomorphism, expected beta: bigint and splitScalar: function")}return Object.freeze({...n})}var{bytesToNumberBE:dn,hexToBytes:hn}=Ft,fe=class extends Error{constructor(n=""){super(n)}},F={Err:fe,_tlv:{encode:(t,n)=>{let{Err:e}=F;if(t<0||t>256)throw new e("tlv.encode: wrong tag");if(n.length&1)throw new e("tlv.encode: unpadded data");let r=n.length/2,o=ht(r);if(o.length/2&128)throw new e("tlv.encode: long form length too big");let i=r>127?ht(o.length/2|128):"";return ht(t)+i+o+n},decode(t,n){let{Err:e}=F,r=0;if(t<0||t>256)throw new e("tlv.encode: wrong tag");if(n.length<2||n[r++]!==t)throw new e("tlv.decode: wrong tlv");let o=n[r++],i=!!(o&128),c=0;if(!i)c=o;else{let s=o&127;if(!s)throw new e("tlv.decode(long): indefinite length not supported");if(s>4)throw new e("tlv.decode(long): byte length is too big");let u=n.subarray(r,r+s);if(u.length!==s)throw new e("tlv.decode: length bytes not complete");if(u[0]===0)throw new e("tlv.decode(long): zero leftmost byte");for(let x of u)c=c<<8|x;if(r+=s,c<128)throw new e("tlv.decode(long): not minimal encoding")}let f=n.subarray(r,r+c);if(f.length!==c)throw new e("tlv.decode: wrong value length");return{v:f,l:n.subarray(r+c)}}},_int:{encode(t){let{Err:n}=F;if(t<X)throw new n("integer: negative integers are not allowed");let e=ht(t);if(Number.parseInt(e[0],16)&8&&(e="00"+e),e.length&1)throw new n("unexpected DER parsing assertion: unpadded hex");return e},decode(t){let{Err:n}=F;if(t[0]&128)throw new n("invalid signature integer: negative");if(t[0]===0&&!(t[1]&128))throw new n("invalid signature integer: unnecessary leading zero");return dn(t)}},toSig(t){let{Err:n,_int:e,_tlv:r}=F,o=typeof t=="string"?hn(t):t;K(o);let{v:i,l:c}=r.decode(48,o);if(c.length)throw new n("invalid signature: left bytes after parsing");let{v:f,l:s}=r.decode(2,i),{v:u,l:x}=r.decode(2,s);if(x.length)throw new n("invalid signature: left bytes after parsing");return{r:e.decode(f),s:e.decode(u)}},hexFromSig(t){let{_tlv:n,_int:e}=F,r=n.encode(2,e.encode(t.r)),o=n.encode(2,e.encode(t.s)),i=r+o;return n.encode(48,i)}},X=BigInt(0),N=BigInt(1),st=BigInt(2),zt=BigInt(3),_e=BigInt(4);function pn(t){let n=ln(t),{Fp:e}=n,r=Mt(n.n,n.nBitLength),o=n.toBytes||((m,a,d)=>{let g=a.toAffine();return Y(Uint8Array.from([4]),e.toBytes(g.x),e.toBytes(g.y))}),i=n.fromBytes||(m=>{let a=m.subarray(1),d=e.fromBytes(a.subarray(0,e.BYTES)),g=e.fromBytes(a.subarray(e.BYTES,2*e.BYTES));return{x:d,y:g}});function c(m){let{a,b:d}=n,g=e.sqr(m),y=e.mul(g,m);return e.add(e.add(y,e.mul(m,a)),d)}if(!e.eql(e.sqr(n.Gy),c(n.Gx)))throw new Error("bad generator point: equation left != right");function f(m){return Ot(m,N,n.n)}function s(m){let{allowedPrivateKeyLengths:a,nByteLength:d,wrapPrivateKey:g,n:y}=n;if(a&&typeof m!="bigint"){if(rt(m)&&(m=dt(m)),typeof m!="string"||!a.includes(m.length))throw new Error("invalid private key");m=m.padStart(d*2,"0")}let v;try{v=typeof m=="bigint"?m:P(D("private key",m,d))}catch{throw new Error("invalid private key, expected hex or "+d+" bytes, got "+typeof m)}return g&&(v=Z(v,y)),it("private key",v,N,y),v}function u(m){if(!(m instanceof h))throw new Error("ProjectivePoint expected")}let x=kt((m,a)=>{let{px:d,py:g,pz:y}=m;if(e.eql(y,e.ONE))return{x:d,y:g};let v=m.is0();a==null&&(a=v?e.ONE:e.inv(y));let L=e.mul(d,a),I=e.mul(g,a),B=e.mul(y,a);if(v)return{x:e.ZERO,y:e.ZERO};if(!e.eql(B,e.ONE))throw new Error("invZ was invalid");return{x:L,y:I}}),l=kt(m=>{if(m.is0()){if(n.allowInfinityPoint&&!e.is0(m.py))return;throw new Error("bad point: ZERO")}let{x:a,y:d}=m.toAffine();if(!e.isValid(a)||!e.isValid(d))throw new Error("bad point: x or y not FE");let g=e.sqr(d),y=c(a);if(!e.eql(g,y))throw new Error("bad point: equation left != right");if(!m.isTorsionFree())throw new Error("bad point: not in prime-order subgroup");return!0});class h{constructor(a,d,g){if(this.px=a,this.py=d,this.pz=g,a==null||!e.isValid(a))throw new Error("x required");if(d==null||!e.isValid(d))throw new Error("y required");if(g==null||!e.isValid(g))throw new Error("z required");Object.freeze(this)}static fromAffine(a){let{x:d,y:g}=a||{};if(!a||!e.isValid(d)||!e.isValid(g))throw new Error("invalid affine point");if(a instanceof h)throw new Error("projective point not allowed");let y=v=>e.eql(v,e.ZERO);return y(d)&&y(g)?h.ZERO:new h(d,g,e.ONE)}get x(){return this.toAffine().x}get y(){return this.toAffine().y}static normalizeZ(a){let d=e.invertBatch(a.map(g=>g.pz));return a.map((g,y)=>g.toAffine(d[y])).map(h.fromAffine)}static fromHex(a){let d=h.fromAffine(i(D("pointHex",a)));return d.assertValidity(),d}static fromPrivateKey(a){return h.BASE.multiply(s(a))}static msm(a,d){return Te(h,r,a,d)}_setWindowSize(a){A.setWindowSize(this,a)}assertValidity(){l(this)}hasEvenY(){let{y:a}=this.toAffine();if(e.isOdd)return!e.isOdd(a);throw new Error("Field doesn't support isOdd")}equals(a){u(a);let{px:d,py:g,pz:y}=this,{px:v,py:L,pz:I}=a,B=e.eql(e.mul(d,I),e.mul(v,y)),O=e.eql(e.mul(g,I),e.mul(L,y));return B&&O}negate(){return new h(this.px,e.neg(this.py),this.pz)}double(){let{a,b:d}=n,g=e.mul(d,zt),{px:y,py:v,pz:L}=this,I=e.ZERO,B=e.ZERO,O=e.ZERO,S=e.mul(y,y),k=e.mul(v,v),U=e.mul(L,L),q=e.mul(y,v);return q=e.add(q,q),O=e.mul(y,L),O=e.add(O,O),I=e.mul(a,O),B=e.mul(g,U),B=e.add(I,B),I=e.sub(k,B),B=e.add(k,B),B=e.mul(I,B),I=e.mul(q,I),O=e.mul(g,O),U=e.mul(a,U),q=e.sub(S,U),q=e.mul(a,q),q=e.add(q,O),O=e.add(S,S),S=e.add(O,S),S=e.add(S,U),S=e.mul(S,q),B=e.add(B,S),U=e.mul(v,L),U=e.add(U,U),S=e.mul(U,q),I=e.sub(I,S),O=e.mul(U,k),O=e.add(O,O),O=e.add(O,O),new h(I,B,O)}add(a){u(a);let{px:d,py:g,pz:y}=this,{px:v,py:L,pz:I}=a,B=e.ZERO,O=e.ZERO,S=e.ZERO,k=n.a,U=e.mul(n.b,zt),q=e.mul(d,v),z=e.mul(g,L),p=e.mul(y,I),b=e.add(d,g),E=e.add(v,L);b=e.mul(b,E),E=e.add(q,z),b=e.sub(b,E),E=e.add(d,y);let T=e.add(v,I);return E=e.mul(E,T),T=e.add(q,p),E=e.sub(E,T),T=e.add(g,y),B=e.add(L,I),T=e.mul(T,B),B=e.add(z,p),T=e.sub(T,B),S=e.mul(k,E),B=e.mul(U,p),S=e.add(B,S),B=e.sub(z,S),S=e.add(z,S),O=e.mul(B,S),z=e.add(q,q),z=e.add(z,q),p=e.mul(k,p),E=e.mul(U,E),z=e.add(z,p),p=e.sub(q,p),p=e.mul(k,p),E=e.add(E,p),q=e.mul(z,E),O=e.add(O,q),q=e.mul(T,E),B=e.mul(b,B),B=e.sub(B,q),q=e.mul(b,z),S=e.mul(T,S),S=e.add(S,q),new h(B,O,S)}subtract(a){return this.add(a.negate())}is0(){return this.equals(h.ZERO)}wNAF(a){return A.wNAFCached(this,a,h.normalizeZ)}multiplyUnsafe(a){let{endo:d,n:g}=n;it("scalar",a,X,g);let y=h.ZERO;if(a===X)return y;if(this.is0()||a===N)return this;if(!d||A.hasPrecomputes(this))return A.wNAFCachedUnsafe(this,a,h.normalizeZ);let{k1neg:v,k1:L,k2neg:I,k2:B}=d.splitScalar(a),O=y,S=y,k=this;for(;L>X||B>X;)L&N&&(O=O.add(k)),B&N&&(S=S.add(k)),k=k.double(),L>>=N,B>>=N;return v&&(O=O.negate()),I&&(S=S.negate()),S=new h(e.mul(S.px,d.beta),S.py,S.pz),O.add(S)}multiply(a){let{endo:d,n:g}=n;it("scalar",a,N,g);let y,v;if(d){let{k1neg:L,k1:I,k2neg:B,k2:O}=d.splitScalar(a),{p:S,f:k}=this.wNAF(I),{p:U,f:q}=this.wNAF(O);S=A.constTimeNegate(L,S),U=A.constTimeNegate(B,U),U=new h(e.mul(U.px,d.beta),U.py,U.pz),y=S.add(U),v=k.add(q)}else{let{p:L,f:I}=this.wNAF(a);y=L,v=I}return h.normalizeZ([y,v])[0]}multiplyAndAddUnsafe(a,d,g){let y=h.BASE,v=(I,B)=>B===X||B===N||!I.equals(y)?I.multiplyUnsafe(B):I.multiply(B),L=v(this,d).add(v(a,g));return L.is0()?void 0:L}toAffine(a){return x(this,a)}isTorsionFree(){let{h:a,isTorsionFree:d}=n;if(a===N)return!0;if(d)return d(h,this);throw new Error("isTorsionFree() has not been declared for the elliptic curve")}clearCofactor(){let{h:a,clearCofactor:d}=n;return a===N?this:d?d(h,this):this.multiplyUnsafe(n.h)}toRawBytes(a=!0){return lt("isCompressed",a),this.assertValidity(),o(h,this,a)}toHex(a=!0){return lt("isCompressed",a),dt(this.toRawBytes(a))}}h.BASE=new h(n.Gx,n.Gy,e.ONE),h.ZERO=new h(e.ZERO,e.ONE,e.ZERO);let w=n.nBitLength,A=Ie(h,n.endo?Math.ceil(w/2):w);return{CURVE:n,ProjectivePoint:h,normPrivateKeyToScalar:s,weierstrassEquation:c,isWithinCurveOrder:f}}function gn(t){let n=ce(t);return Q(n,{hash:"hash",hmac:"function",randomBytes:"function"},{bits2int:"function",bits2int_modN:"function",lowS:"boolean"}),Object.freeze({lowS:!0,...n})}function qe(t){let n=gn(t),{Fp:e,n:r}=n,o=e.BYTES+1,i=2*e.BYTES+1;function c(p){return Z(p,r)}function f(p){return Vt(p,r)}let{ProjectivePoint:s,normPrivateKeyToScalar:u,weierstrassEquation:x,isWithinCurveOrder:l}=pn({...n,toBytes(p,b,E){let T=b.toAffine(),_=e.toBytes(T.x),H=Y;return lt("isCompressed",E),E?H(Uint8Array.from([b.hasEvenY()?2:3]),_):H(Uint8Array.from([4]),_,e.toBytes(T.y))},fromBytes(p){let b=p.length,E=p[0],T=p.subarray(1);if(b===o&&(E===2||E===3)){let _=P(T);if(!Ot(_,N,e.ORDER))throw new Error("Point is not on curve");let H=x(_),M;try{M=e.sqrt(H)}catch(W){let j=W instanceof Error?": "+W.message:"";throw new Error("Point is not on curve"+j)}let V=(M&N)===N;return(E&1)===1!==V&&(M=e.neg(M)),{x:_,y:M}}else if(b===i&&E===4){let _=e.fromBytes(T.subarray(0,e.BYTES)),H=e.fromBytes(T.subarray(e.BYTES,2*e.BYTES));return{x:_,y:H}}else{let _=o,H=i;throw new Error("invalid Point, expected length of "+_+", or uncompressed "+H+", got "+b)}}}),h=p=>dt(ot(p,n.nByteLength));function w(p){let b=r>>N;return p>b}function A(p){return w(p)?c(-p):p}let m=(p,b,E)=>P(p.slice(b,E));class a{constructor(b,E,T){this.r=b,this.s=E,this.recovery=T,this.assertValidity()}static fromCompact(b){let E=n.nByteLength;return b=D("compactSignature",b,E*2),new a(m(b,0,E),m(b,E,2*E))}static fromDER(b){let{r:E,s:T}=F.toSig(D("DER",b));return new a(E,T)}assertValidity(){it("r",this.r,N,r),it("s",this.s,N,r)}addRecoveryBit(b){return new a(this.r,this.s,b)}recoverPublicKey(b){let{r:E,s:T,recovery:_}=this,H=I(D("msgHash",b));if(_==null||![0,1,2,3].includes(_))throw new Error("recovery id invalid");let M=_===2||_===3?E+n.n:E;if(M>=e.ORDER)throw new Error("recovery id 2 or 3 invalid");let V=(_&1)===0?"02":"03",J=s.fromHex(V+h(M)),W=f(M),j=c(-H*W),wt=c(T*W),tt=s.BASE.multiplyAndAddUnsafe(J,j,wt);if(!tt)throw new Error("point at infinify");return tt.assertValidity(),tt}hasHighS(){return w(this.s)}normalizeS(){return this.hasHighS()?new a(this.r,c(-this.s),this.recovery):this}toDERRawBytes(){return pt(this.toDERHex())}toDERHex(){return F.hexFromSig({r:this.r,s:this.s})}toCompactRawBytes(){return pt(this.toCompactHex())}toCompactHex(){return h(this.r)+h(this.s)}}let d={isValidPrivateKey(p){try{return u(p),!0}catch{return!1}},normPrivateKeyToScalar:u,randomPrivateKey:()=>{let p=ne(n.n);return ve(n.randomBytes(p),n.n)},precompute(p=8,b=s.BASE){return b._setWindowSize(p),b.multiply(BigInt(3)),b}};function g(p,b=!0){return s.fromPrivateKey(p).toRawBytes(b)}function y(p){let b=rt(p),E=typeof p=="string",T=(b||E)&&p.length;return b?T===o||T===i:E?T===2*o||T===2*i:p instanceof s}function v(p,b,E=!0){if(y(p))throw new Error("first arg must be private key");if(!y(b))throw new Error("second arg must be public key");return s.fromHex(b).multiply(u(p)).toRawBytes(E)}let L=n.bits2int||function(p){if(p.length>8192)throw new Error("input is too large");let b=P(p),E=p.length*8-n.nBitLength;return E>0?b>>BigInt(E):b},I=n.bits2int_modN||function(p){return c(L(p))},B=It(n.nBitLength);function O(p){return it("num < 2^"+n.nBitLength,p,X,B),ot(p,n.nByteLength)}function S(p,b,E=k){if(["recovered","canonical"].some(ft=>ft in E))throw new Error("sign() legacy options not supported");let{hash:T,randomBytes:_}=n,{lowS:H,prehash:M,extraEntropy:V}=E;H==null&&(H=!0),p=D("msgHash",p),Le(E),M&&(p=D("prehashed msgHash",T(p)));let J=I(p),W=u(b),j=[O(W),O(J)];if(V!=null&&V!==!1){let ft=V===!0?_(e.BYTES):V;j.push(D("extraEntropy",ft))}let wt=Y(...j),tt=J;function Dt(ft){let mt=L(ft);if(!l(mt))return;let Yt=f(mt),Bt=s.BASE.multiply(mt).toAffine(),at=c(Bt.x);if(at===X)return;let vt=c(Yt*c(tt+at*W));if(vt===X)return;let xt=(Bt.x===at?0:2)|Number(Bt.y&N),ae=vt;return H&&w(vt)&&(ae=A(vt),xt^=1),new a(at,ae,xt)}return{seed:wt,k2sig:Dt}}let k={lowS:n.lowS,prehash:!1},U={lowS:n.lowS,prehash:!1};function q(p,b,E=k){let{seed:T,k2sig:_}=S(p,b,E),H=n;return $t(H.hash.outputLen,H.nByteLength,H.hmac)(T,_)}s.BASE._setWindowSize(8);function z(p,b,E,T=U){let _=p;b=D("msgHash",b),E=D("publicKey",E);let{lowS:H,prehash:M,format:V}=T;if(Le(T),"strict"in T)throw new Error("options.strict was renamed to lowS");if(V!==void 0&&V!=="compact"&&V!=="der")throw new Error("format must be compact or der");let J=typeof _=="string"||rt(_),W=!J&&!V&&typeof _=="object"&&_!==null&&typeof _.r=="bigint"&&typeof _.s=="bigint";if(!J&&!W)throw new Error("invalid signature, expected Uint8Array, hex string or Signature instance");let j,wt;try{if(W&&(j=new a(_.r,_.s)),J){try{V!=="compact"&&(j=a.fromDER(_))}catch(xt){if(!(xt instanceof F.Err))throw xt}!j&&V!=="der"&&(j=a.fromCompact(_))}wt=s.fromHex(E)}catch{return!1}if(!j||H&&j.hasHighS())return!1;M&&(b=n.hash(b));let{r:tt,s:Dt}=j,ft=I(b),mt=f(Dt),Yt=c(ft*mt),Bt=c(tt*mt),at=s.BASE.multiplyAndAddUnsafe(wt,Yt,Bt)?.toAffine();return at?c(at.x)===tt:!1}return{CURVE:n,getPublicKey:g,getSharedSecret:v,sign:q,verify:z,ProjectivePoint:s,Signature:a,utils:d}}function wn(t,n){let e=t.ORDER,r=X;for(let A=e-N;A%st===X;A/=st)r+=N;let o=r,i=st<<o-N-N,c=i*st,f=(e-N)/c,s=(f-N)/st,u=c-N,x=i,l=t.pow(n,f),h=t.pow(n,(f+N)/st),w=(A,m)=>{let a=l,d=t.pow(m,u),g=t.sqr(d);g=t.mul(g,m);let y=t.mul(A,g);y=t.pow(y,s),y=t.mul(y,d),d=t.mul(y,m),g=t.mul(y,A);let v=t.mul(g,d);y=t.pow(v,x);let L=t.eql(y,t.ONE);d=t.mul(g,h),y=t.mul(v,a),g=t.cmov(d,g,L),v=t.cmov(y,v,L);for(let I=o;I>N;I--){let B=I-st;B=st<<B-N;let O=t.pow(v,B),S=t.eql(O,t.ONE);d=t.mul(g,a),a=t.mul(a,a),O=t.mul(v,a),g=t.cmov(d,g,S),v=t.cmov(O,v,S)}return{isValid:L,value:g}};if(t.ORDER%_e===zt){let A=(t.ORDER-zt)/_e,m=t.sqrt(t.neg(n));w=(a,d)=>{let g=t.sqr(d),y=t.mul(a,d);g=t.mul(g,y);let v=t.pow(g,A);v=t.mul(v,y);let L=t.mul(v,m),I=t.mul(t.sqr(v),d),B=t.eql(I,a),O=t.cmov(L,v,B);return{isValid:B,value:O}}}return w}function Ne(t,n){if(Zt(t),!t.isValid(n.A)||!t.isValid(n.B)||!t.isValid(n.Z))throw new Error("mapToCurveSimpleSWU: invalid opts");let e=wn(t,n.Z);if(!t.isOdd)throw new Error("Fp.isOdd is not implemented!");return r=>{let o,i,c,f,s,u,x,l;o=t.sqr(r),o=t.mul(o,n.Z),i=t.sqr(o),i=t.add(i,o),c=t.add(i,t.ONE),c=t.mul(c,n.B),f=t.cmov(n.Z,t.neg(i),!t.eql(i,t.ZERO)),f=t.mul(f,n.A),i=t.sqr(c),u=t.sqr(f),s=t.mul(u,n.A),i=t.add(i,s),i=t.mul(i,c),u=t.mul(u,f),s=t.mul(u,n.B),i=t.add(i,s),x=t.mul(o,c);let{isValid:h,value:w}=e(i,u);l=t.mul(o,r),l=t.mul(l,w),x=t.cmov(x,c,h),l=t.cmov(l,w,h);let A=t.isOdd(r)===t.isOdd(l);return l=t.cmov(t.neg(l),l,A),x=t.div(x,f),{x,y:l}}}function mn(t){return{hash:t,hmac:(n,...e)=>Gt(t,n,he(...e)),randomBytes:ge}}function Ue(t,n){let e=r=>qe({...t,...mn(r)});return{...e(n),create:e}}var xn=P;function ct(t,n){if(Tt(t),Tt(n),t<0||t>=1<<8*n)throw new Error("invalid I2OSP input: "+t);let e=Array.from({length:n}).fill(0);for(let r=n-1;r>=0;r--)e[r]=t&255,t>>>=8;return new Uint8Array(e)}function yn(t,n){let e=new Uint8Array(t.length);for(let r=0;r<t.length;r++)e[r]=t[r]^n[r];return e}function Tt(t){if(!Number.isSafeInteger(t))throw new Error("number expected")}function bn(t,n,e,r){K(t),K(n),Tt(e),n.length>255&&(n=r(Y(St("H2C-OVERSIZE-DST-"),n)));let{outputLen:o,blockLen:i}=r,c=Math.ceil(e/o);if(e>65535||c>255)throw new Error("expand_message_xmd: invalid lenInBytes");let f=Y(n,ct(n.length,1)),s=ct(0,i),u=ct(e,2),x=new Array(c),l=r(Y(s,t,u,ct(0,1),f));x[0]=r(Y(l,ct(1,1),f));for(let w=1;w<=c;w++){let A=[yn(l,x[w-1]),ct(w+1,1),f];x[w]=r(Y(...A))}return Y(...x).slice(0,e)}function En(t,n,e,r,o){if(K(t),K(n),Tt(e),n.length>255){let i=Math.ceil(2*r/8);n=o.create({dkLen:i}).update(St("H2C-OVERSIZE-DST-")).update(n).digest()}if(e>65535||n.length>255)throw new Error("expand_message_xof: invalid lenInBytes");return o.create({dkLen:e}).update(t).update(ct(e,2)).update(n).update(ct(n.length,1)).digest()}function Re(t,n,e){Q(e,{DST:"stringOrUint8Array",p:"bigint",m:"isSafeInteger",k:"isSafeInteger",hash:"hash"});let{p:r,k:o,m:i,hash:c,expand:f,DST:s}=e;K(t),Tt(n);let u=typeof s=="string"?St(s):s,x=r.toString(2).length,l=Math.ceil((x+o)/8),h=n*i*l,w;if(f==="xmd")w=bn(t,u,h,c);else if(f==="xof")w=En(t,u,h,o,c);else if(f==="_internal_pass")w=t;else throw new Error('expand must be "xmd" or "xof"');let A=new Array(n);for(let m=0;m<n;m++){let a=new Array(i);for(let d=0;d<i;d++){let g=l*(d+m*i),y=w.subarray(g,g+l);a[d]=Z(xn(y),r)}A[m]=a}return A}function He(t,n,e){if(typeof n!="function")throw new Error("mapToCurve() must be defined");return{hashToCurve(r,o){let i=Re(r,2,{...e,DST:e.DST,...o}),c=t.fromAffine(n(i[0])),f=t.fromAffine(n(i[1])),s=c.add(f).clearCofactor();return s.assertValidity(),s},encodeToCurve(r,o){let i=Re(r,1,{...e,DST:e.encodeDST,...o}),c=t.fromAffine(n(i[0])).clearCofactor();return c.assertValidity(),c},mapToCurve(r){if(!Array.isArray(r))throw new Error("mapToCurve: expected array of bigints");for(let i of r)if(typeof i!="bigint")throw new Error("mapToCurve: expected array of bigints");let o=t.fromAffine(n(r)).clearCofactor();return o.assertValidity(),o}}}var Lt=Mt(BigInt("0xffffffff00000001000000000000000000000000ffffffffffffffffffffffff")),Ce=Lt.create(BigInt("-3")),ke=BigInt("0x5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b"),Bn=Ue({a:Ce,b:ke,Fp:Lt,n:BigInt("0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551"),Gx:BigInt("0x6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296"),Gy:BigInt("0x4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5"),h:BigInt(1),lowS:!1},Wt),vn=Bn,An=Ne(Lt,{A:Ce,B:ke,Z:Lt.create(BigInt("-10"))}),Ve=He(vn.ProjectivePoint,t=>An(t[0]),{DST:"P256_XMD:SHA-256_SSWU_RO_",encodeDST:"P256_XMD:SHA-256_SSWU_NU_",p:Lt.ORDER,m:1,k:128,expand:"xmd",hash:Wt}),cr=Ve.hashToCurve,fr=Ve.encodeToCurve;window.NOBLE_P256=Bn;;
+/*! Bundled license information:
+
+@noble/hashes/esm/utils.js:
+  (*! noble-hashes - MIT License (c) 2022 Paul Miller (paulmillr.com) *)
+
+@noble/curves/esm/abstract/utils.js:
+@noble/curves/esm/abstract/modular.js:
+@noble/curves/esm/abstract/curve.js:
+@noble/curves/esm/abstract/weierstrass.js:
+@noble/curves/esm/_shortw_utils.js:
+@noble/curves/esm/p256.js:
+  (*! noble-curves - MIT License (c) 2022 Paul Miller (paulmillr.com) *)
+*/
+//# sourceMappingURL=p256.bundle.mjs.map
+
+/* ---------- 桥接层（对外接口与旧实现完全一致，调用处零改动） ---------- */
+function hexToBytes(h) {
+  const b = new Uint8Array(h.length / 2);
+  for (let i = 0; i < b.length; i++) b[i] = parseInt(h.substr(i * 2, 2), 16);
+  return b;
+}
+function bytesToHex(b) {
+  return Array.from(b, x => x.toString(16).padStart(2, '0')).join('');
+}
+function latin1(bytes) { let s = ''; for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]); return s; }
+/* SHA-256(字节)：优先 WebCrypto，异常时退回页内纯 JS 实现 */
+async function sha256Bytes(bytes) {
+  if (window.crypto && crypto.subtle && crypto.subtle.digest) {
+    try { return new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)); } catch (e) {}
+  }
+  return hexToBytes(sha256(latin1(bytes)));
+}
+async function sha256HexText(t) { return bytesToHex(await sha256Bytes(new TextEncoder().encode(t))); }
+function ecPointFromHex(h) {
+  try { window.NOBLE_P256.ProjectivePoint.fromHex(h); return true; } catch (e) { return false; }
+}
+function ecVerifyOne(pubHex, msgHexHash, sigHex) {
+  // noble 期望预哈希消息；签名格式不变（r||s 128hex）；lowS 严格模式杜绝 (r, n-s) 可锻性伪造
+  try {
+    return window.NOBLE_P256.verify(sigHex.toLowerCase(), hexToBytes(msgHexHash), pubHex.toLowerCase(), { lowS: true });
+  } catch (e) { return false; }
+}
+/* 公钥集合 = 内置基线 ∪ 本地追加（localStorage 持久；本地永不能删除/覆盖内置，改页面代码才会更新基线） */
+const LS_PUB = 'eonun_pubkeys_v1';
+let localPubs = [];
+let remotePubs = [];   // 在线模式从同目录 keys.json 读取（在 GitHub 上传该文件即可新增公信公钥，无需改代码）
+
+let remoteRegistry = new Map();   // 在线模式从同目录 registry.json 读取（统一名单JSON）
+function loadRemoteRegistry(){
+  if (location.protocol === 'file:') return;   // 本地文件协议不加载远程
+  fetch('registry.json', { cache: 'no-store' })
+    .then(r => r.ok ? r.json() : [])
+    .then(d => {
+      const entries = Array.isArray(d) ? d : (d.entries || []);
+      remoteRegistry = new Map();
+      entries.forEach(x => {
+        const i = String(x.id || '').trim().toUpperCase();
+        if (i) {
+          const status = (x.status || 'inactive').toLowerCase();
+          remoteRegistry.set(i, {
+            name: x.name || '',
+            status: ['active', 'revoked'].includes(status) ? status : 'inactive',
+            note: x.note || ''
+          });
+        }
+      });
+      // 在线名单与本地名单合并（在线优先）
+      remoteRegistry.forEach((e, id) => unifiedRegistry.set(id, e));
+      saveLS(); renderRegistry();
+      if (location.hash.length > 1 && typeof verify === 'function') { try { verify(); } catch(e){} }
+    })
+    .catch(() => {});
+}
+
+function loadRemotePubs(){
+  if (location.protocol === 'file:') return;   // 本地 file:// 读不了，静默回落
+  fetch('keys.json', {cache: 'no-store'})
+    .then(r => r.ok ? r.json() : [])
+    .then(d => {
+      // 兼容三种格式：生成器导出的公钥数组 / {teacherPub} / 私钥备份 {keys:[{pub}]}
+      if (Array.isArray(d)) remotePubs = d;
+      else if (d && typeof d === 'object') {
+        if (typeof d.teacherPub === 'string') remotePubs = [d.teacherPub];
+        else if (Array.isArray(d.keys)) remotePubs = d.keys.map(k => (k && k.pub) ? k.pub : k).filter(Boolean);
+      }
+      // 若从证书链接跳转进来，公钥加载完成后自动重验一次
+      if (location.hash.length > 1 && typeof verify === 'function') { try { verify(); } catch(e){} }
+    })
+    .catch(() => {});
+}
+function loadPubs(){ try{ const d = JSON.parse(localStorage.getItem(LS_PUB) || '[]'); localPubs = Array.isArray(d) ? d : []; }catch(e){ localPubs = []; } }
+function savePubs(){ try{ localStorage.setItem(LS_PUB, JSON.stringify(localPubs)); }catch(e){} }
+function allPubs(){
+  const seen = new Set(), out = [];
+  PUBLIC_KEYS.concat(remotePubs).concat(localPubs).forEach(k => {
+    k = String(k).trim().toLowerCase();
+    if (/^04[0-9a-f]{128}$/.test(k) && !seen.has(k)) { seen.add(k); out.push(k); }
+  });
+  return out;
+}
+/* 验签：返回通过验证的那把公钥（小写 hex），全部不通过返回 ''。
+   v2 解密时优先用这把公钥做 ECDH —— 签名钥匙即加密钥匙。 */
+function ecVerifyAny(msg, sigHex) {
+  const h = sha256(msg.trim().toUpperCase());
+  if (!h) return '';
+  for (const pub of allPubs()) {
+    try { if (ecVerifyOne(pub, h, sigHex)) return pub; } catch(e) {}
+  }
+  return '';
+}</script>
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    font-family: 'Avenir Next', Avenir, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
+    background:
+      radial-gradient(ellipse 60% 40% at 100% 0%, rgba(123,44,191,0.15), transparent 60%),
+      radial-gradient(ellipse 60% 40% at 0% 100%, rgba(74,144,226,0.12), transparent 60%),
+      #12121a;
+    color: #ddd; min-height: 100vh;
+    display: flex; flex-direction: column; align-items: center;
+    padding: 40px 20px;
+  }
+  .logo {
+    font-family: 'EDIX', 'Avenir Next', sans-serif;
+    font-size: 26px; font-weight: 800; letter-spacing: 0.5ch;
+    color: #fff; text-shadow: 0 0 12px rgba(255,255,255,0.5);
+  }
+  .sub { font-size: 11px; letter-spacing: 0.5em; color: rgba(255,255,255,0.4); margin-top: 6px; text-transform: uppercase; }
+  .panel {
+    margin-top: 30px; width: 100%; max-width: 520px;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(123,44,191,0.3);
+    border-radius: 16px; padding: 26px;
+    box-shadow: 0 10px 40px rgba(123,44,191,0.2);
+  }
+  .panel label { display:block; font-size:12px; color:#888; margin-bottom:8px; letter-spacing:0.5px; }
+  .panel input {
+    width:100%; background: rgba(255,255,255,0.06);
+    border:1px solid rgba(123,44,191,0.35); border-radius:10px;
+    padding:12px 14px; color:#fff; font-size:15px; outline:none;
+    font-family: ui-monospace, 'SF Mono', Consolas, monospace; letter-spacing:0.05em;
+  }
+  .panel input:focus { border-color:#7B2CBF; box-shadow:0 0 12px rgba(123,44,191,0.4); }
+  .btn {
+    width:100%; margin-top:14px;
+    background: linear-gradient(90deg, #7B2CBF, #4A90E2);
+    color:#fff; border:none; border-radius:50px;
+    padding:12px; font-size:14px; font-weight:bold; letter-spacing:1px; cursor:pointer;
+    box-shadow: 0 4px 15px rgba(123,44,191,0.4);
+  }
+  .btn:active { transform: scale(0.98); }
+  .btn.small { width:auto; padding:7px 16px; font-size:12px; margin-top:0; box-shadow:none; }
+  .btn.danger { background: transparent; border:1px solid rgba(231,76,60,0.6); color:#E74C3C; }
+  .btn.plain { background: transparent; border:1px solid rgba(123,44,191,0.5); color:#C084FC; }
+  .secret-row { margin-top:14px; display:none; }
+  .secret-toggle { margin-top:14px; font-size:12px; color:#666; cursor:pointer; text-align:center; }
+  .secret-toggle:hover { color:#9B59B6; }
+
+  .result {
+    margin-top: 24px; width: 100%; max-width: 520px;
+    border-radius: 16px; padding: 28px; text-align: center;
+    display: none;
+  }
+  .result.ok {
+    display:block;
+    background: rgba(46,204,113,0.08);
+    border: 1px solid rgba(46,204,113,0.45);
+    box-shadow: 0 0 30px rgba(46,204,113,0.15);
+  }
+  .result.bad {
+    display:block;
+    background: rgba(231,76,60,0.08);
+    border: 1px solid rgba(231,76,60,0.45);
+    box-shadow: 0 0 30px rgba(231,76,60,0.15);
+  }
+  .result.warn {
+    display:block;
+    background: rgba(243,156,18,0.08);
+    border: 1px solid rgba(243,156,18,0.5);
+    box-shadow: 0 0 30px rgba(243,156,18,0.15);
+  }
+  .result .icon { font-size: 50px; }
+  .result.ok .icon { color: #2ECC71; text-shadow: 0 0 20px rgba(46,204,113,0.7); }
+  .result.bad .icon { color: #E74C3C; text-shadow: 0 0 20px rgba(231,76,60,0.7); }
+  .result.warn .icon { color: #F39C12; text-shadow: 0 0 20px rgba(243,156,18,0.7); }
+  .result h2 { color:#fff; font-size:21px; margin-top:10px; letter-spacing:0.2em; }
+  .result .meta { margin-top:14px; color:rgba(255,255,255,0.6); font-size:13px; line-height:2; }
+  .result .meta b { color:#C084FC; font-family: ui-monospace, Consolas, monospace; }
+  .result .note { margin-top:12px; font-size:11px; color:rgba(255,255,255,0.35); line-height:1.8; }
+
+  /* ========== 卡片渲染 ========== */
+  .render-area { width:100%; max-width:600px; margin-top:20px; }
+/* ===== 通行证卡片（86×54mm · 冻结规格）===== */
+  .ecard-host .pass-card {
+    width: 86mm; height: 54mm;
+    position: relative;
+    background: #14141c;
+    color: #fff;
+    border-radius: 3mm;
+    overflow: hidden;
+    box-shadow: 0 10px 40px rgba(0,0,0,0.5);
+  }
+  .ecard-host .pass-mark {
+    position: absolute; inset: 0; z-index: 1;
+    display: flex; align-items: center; justify-content: center;
+    font-family: 'EDIX', 'Avenir Next', sans-serif;
+    font-size: 27mm; font-weight: 800; letter-spacing: 0.06em;
+    white-space: nowrap;
+    pointer-events: none; user-select: none;
+  }
+  .ecard-host .pass-inner {
+    position: relative; z-index: 2; height: 100%;
+    display: flex; flex-direction: column;
+    padding: 5mm 6mm 4.5mm;
+  }
+  .ecard-host .pass-head { display: flex; justify-content: space-between; align-items: baseline; }
+  .ecard-host .pass-logo {
+    font-family: 'EDIX', 'Avenir Next', sans-serif;
+    font-size: 16px; font-weight: 800; letter-spacing: 0.4ch;
+    color: #fff;
+    text-shadow: 0 0 8px rgba(255,255,255,0.4);
+  }
+  .ecard-host .pass-title { font-size: 9px; letter-spacing: 0.35em; color: #FFFFFF; font-weight: 700; }
+  .ecard-host .pass-main { flex: 1; display: flex; flex-direction: column; justify-content: center; }
+  .ecard-host .pass-name { font-size: 26px; font-weight: 800; letter-spacing: 0.08em; color: #fff; }
+  .ecard-host .pass-role { font-size: 10px; color: rgba(255,255,255,0.55); letter-spacing: 0.2em; margin-top: 1.5mm; }
+  .ecard-host .pass-role.o-role { white-space: pre-line; line-height: 1.5; }
+  .ecard-host .pass-foot { display: flex; justify-content: space-between; align-items: flex-end; }
+  .ecard-host .pass-meta { font-size: 9px; color: rgba(255,255,255,0.6); line-height: 1.9; }
+  .ecard-host .pass-id span { color: #fff; font-family: ui-monospace, monospace; letter-spacing: 0.05em; font-weight: 700; }
+  .ecard-host .pass-color { display: flex; align-items: center; gap: 1.5mm; }
+  .ecard-host .pass-swatch {
+    width: 4mm; height: 4mm; border-radius: 1mm; display: inline-block;
+    border: 1px solid rgba(255,255,255,0.3);
+  }
+  .ecard-host .pass-hex { font-family: ui-monospace, monospace; letter-spacing: 0.08em; font-size: 8.5px; font-weight: 700; }
+  .ecard-host .pass-qr-wrap { text-align: center; }
+  .ecard-host .pass-qr {
+    width: 13mm; height: 13mm; background: #fff; border-radius: 1.2mm; padding: 1mm;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .ecard-host .pass-qr img, .ecard-host .pass-qr canvas { width: 100% !important; height: 100% !important; display: block; }
+  .ecard-host .pass-qr-tip { font-size: 7px; color: #FFFFFF; letter-spacing: 0.25em; margin-top: 1mm; }
+
+  /* 通行证 · 大师课黑白金 */
+  .ecard-host.master .pass-card { background: #fdfdfd; color: #1a1a1a; }
+  .ecard-host.master .pass-logo { color: #111; text-shadow: none; }
+  .ecard-host.master .pass-title { color: rgba(0,0,0,0.5); }
+  .ecard-host.master .pass-name { color: #111; }
+  .ecard-host.master .pass-role { color: rgba(0,0,0,0.5); }
+  .ecard-host.master .pass-meta { color: rgba(0,0,0,0.55); }
+  .ecard-host.master .pass-qr-tip { color: rgba(0,0,0,0.5); }
+
+
+  /* 学习中铭牌（与二维码同 footprint 互换） */
+  .ecard-host .pass-learning {
+    width: 13mm; height: 13mm;
+    margin-bottom: 3.5mm;   /* 补齐「扫码验证」行高：两种状态下名字位置一致 */
+    border: 1px solid; border-radius: 1.2mm;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 0.6mm;
+  }
+  .ecard-host .pl-cn { font-size: 8.5px; font-weight: 800; letter-spacing: 0.15em; }
+  .ecard-host .pl-en { font-size: 4.5px; letter-spacing: 0.3em; opacity: 0.6; }
+  /* 空白占位（其他证件隐藏二维码时用）：与铭牌/二维码同 footprint */
+  .ecard-host .pass-blank { width: 13mm; height: 13mm; margin-bottom: 3.5mm; }
+
+
+  /* ============ 证书本体 ============ */
+  .ecard-host .cert {
+    width: 297mm; height: 210mm;
+    position: relative;
+    background:
+      radial-gradient(ellipse 60% 50% at 100% 0%, var(--a1-18), transparent 60%),
+      radial-gradient(ellipse 60% 50% at 0% 100%, var(--glow2), transparent 60%),
+      linear-gradient(135deg, var(--bg1) 0%, var(--bg2) 50%, var(--bg3) 100%);
+    color: #fff;
+    padding: 12mm;
+    overflow: hidden;
+  }
+  /* 外框 */
+  .ecard-host .cert::before {
+    content: ""; position: absolute; inset: 7mm;
+    border: 1px solid var(--a1-45);
+    border-radius: 3mm;
+    pointer-events: none;
+  }
+  /* 内框 + 渐变角 */
+  .ecard-host .cert::after {
+    content: ""; position: absolute; inset: 9mm;
+    border: 1px solid var(--a1-18);
+    border-radius: 2mm;
+    background:
+      linear-gradient(135deg, var(--a1), var(--a2)) top left / 22mm 1.2px,
+      linear-gradient(135deg, var(--a1), var(--a2)) top left / 1.2px 22mm,
+      linear-gradient(315deg, var(--a1), var(--a2)) bottom right / 22mm 1.2px,
+      linear-gradient(315deg, var(--a1), var(--a2)) bottom right / 1.2px 22mm;
+    background-repeat: no-repeat;
+    pointer-events: none;
+  }
+  /* 水印 */
+  .ecard-host .watermark {
+    position: absolute; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 90mm; font-weight: 800; letter-spacing: 0.1em;
+    color: rgba(255,255,255,0.022);
+    pointer-events: none; user-select: none;
+    font-family: 'EDIX', 'Avenir Next', sans-serif;
+  }
+  .ecard-host .cert-inner {
+    position: relative; z-index: 2;
+    height: 100%;
+    display: flex; flex-direction: column;
+    padding: 6mm 10mm;
+  }
+  .ecard-host .cert-logo {
+    text-align: center;
+    font-family: 'EDIX', 'Avenir Next', sans-serif;
+    font-size: 28px; font-weight: 800; letter-spacing: 0.5ch;
+    text-shadow: 0 0 12px rgba(255,255,255,0.5);
+    margin-top: 1mm;
+  }
+  .ecard-host .cert-en {
+    text-align: center;
+    font-size: 10.5px; letter-spacing: 0.55em; color: rgba(255,255,255,0.45);
+    margin-top: 2.5mm; text-transform: uppercase;
+  }
+  .ecard-host .cert-title {
+    text-align: center;
+    font-size: 42px; font-weight: 800;
+    margin-top: 6mm; letter-spacing: 0.35em; text-indent: 0.35em;
+    background: linear-gradient(135deg, var(--a1l), var(--a1) 45%, var(--a2));
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent;
+    filter: drop-shadow(0 0 14px var(--a1-55));
+  }
+  .ecard-host .cert-divider {
+    width: 64mm; height: 1px; margin: 5mm auto 0;
+    background: linear-gradient(90deg, transparent, var(--a1), var(--a2), transparent);
+    position: relative;
+  }
+  .ecard-host .cert-divider::after {
+    content: "◆"; position: absolute; left: 50%; top: 50%;
+    transform: translate(-50%,-50%);
+    font-size: 10px; color: var(--amid);
+    background: var(--bgdot); padding: 0 8px;
+  }
+  .ecard-host .cert-body {
+    flex: 1 1 0; min-height: 0;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    text-align: center;
+    padding: 2mm 14mm;
+  }
+  /* 底部组合层：默认不存在（contents），split 时变成左右双栏 */
+  .ecard-host .bottom-row { display: contents; margin-top: auto; }
+  /* —— 极限模式：整体紧凑化，给底部让出预算 —— */
+  .ecard-host .cert.split .cert-title { margin-top: 5mm; font-size: 40px; }
+  .ecard-host .cert.split .cert-divider { margin-top: 4.5mm; }
+  .ecard-host .cert.split .cert-body { padding: 2mm 14mm; }
+  .ecard-host .cert.split .cert-name { font-size: 40px; margin: 4mm 0; }
+  .ecard-host .cert.split .cert-text { font-size: 14.5px; line-height: 1.9; }
+  .ecard-host .cert.split .cert-skills { margin-top: 4.5mm; }
+  .ecard-host .cert.split .skill-pill { font-size: 12px; padding: 1.8mm 5mm; }
+
+  .ecard-host .cert.split .bottom-row {
+    display: flex; align-items: flex-end; gap: 7mm;
+    margin: 0 4mm 5mm;
+  }
+  /* 权益区：固定预算 58mm，三栏，字号由 JS 按条数降档 */
+  .ecard-host .cert.split .cert-benefits {
+    flex: 1; margin: 0; max-height: 58mm; overflow: hidden;
+    columns: 3; column-gap: 6mm;
+    padding: 3mm 5mm 2mm;
+  }
+  .ecard-host .cert.split .cert-benefits h4 { margin-bottom: 1.5mm; font-size: 10px; }
+  .ecard-host .cert.split .cert-benefits .b-note {
+    font-size: 8.5px; margin-top: 2mm; padding-top: 1.5mm;
+  }
+  /* 右列：签名 + 二维码收紧 */
+  .ecard-host .cert.split .cert-footer {
+    flex-direction: column; align-items: flex-end; gap: 3mm;
+    padding: 0; flex-shrink: 0; width: 62mm;
+  }
+  .ecard-host .cert.split .sig-block { text-align: right; }
+  .ecard-host .cert.split .sig-line { min-width: 0; padding-right: 0; }
+  .ecard-host .cert.split .qr-block { text-align: right; }
+  .ecard-host .cert.split .qr-box { margin: 0 0 0 auto; }
+  .ecard-host .cert.split .sig-line { font-size: 26px; min-width: 42mm; min-height: 10mm; padding-bottom: 1mm; }
+  .ecard-host .cert.split .sig-role { font-size: 10.5px; margin-top: 2mm; }
+  .ecard-host .cert.split .sig-date { font-size: 10.5px; margin-top: 1mm; }
+  .ecard-host .cert.split .qr-box { width: 22mm; height: 22mm; padding: 1.2mm; }
+  .ecard-host .cert.split .qr-id { font-size: 10px; margin-top: 2mm; }
+  .ecard-host .cert.split .qr-tip { font-size: 9px; }
+  .ecard-host .cert-present { color: rgba(255,255,255,0.55); font-size: 14px; letter-spacing: 0.3em; }
+  .ecard-host .cert-name {
+    font-size: 48px; font-weight: 800; margin: 4mm 0;
+    letter-spacing: 0.12em;
+    text-shadow: 0 0 20px var(--a1-50);
+  }
+  .ecard-host .cert-text { color: rgba(255,255,255,0.75); font-size: 15px; line-height: 1.9; }
+  .ecard-host .cert-text b { color: var(--txt-acc, var(--a1l)); font-weight: 700; }
+  .ecard-host .cert-skills { display: flex; gap: 3.5mm; margin-top: 4.5mm; flex-wrap: wrap; justify-content: center; }
+  .ecard-host .skill-pill {
+    padding: 1.8mm 5mm; border-radius: 50px; font-size: 12px;
+    color: var(--a1-xl);
+    background: var(--a1-15);
+    border: 1px solid var(--a1-50);
+  }
+  .ecard-host .cert-benefits {
+    margin: 0 4mm 5mm;
+    padding: 3mm 5mm 2mm;
+    border: 1px solid var(--a1-28);
+    border-radius: 3mm;
+    background: var(--a1-05);
+    font-size: 10px; color: rgba(255,255,255,0.68); line-height: 1.7;
+    columns: 3; column-gap: 6mm;
+    flex-shrink: 0;
+    max-height: 40mm; overflow-y: auto;
+  }
+  .ecard-host .cert-benefits::-webkit-scrollbar { width: 4px; }
+  .ecard-host .cert-benefits::-webkit-scrollbar-thumb { background: var(--a1-50); border-radius: 4px; }
+  .ecard-host .cert-benefits h4 {
+    column-span: all;
+    font-size: 11px; letter-spacing: 0.35em; color: var(--amid);
+    margin-bottom: 2mm; font-weight: 700;
+  }
+  .ecard-host .cert-benefits .b-line { break-inside: avoid; }
+  .ecard-host .cert-benefits .b-line::before { content: "★ "; color: var(--a1); }
+  .ecard-host .cert-benefits .b-gold { color: #C9A227; font-weight: 700; }
+  .ecard-host .cert.master .cert-benefits .b-gold { color: #9A7B0A; }
+  .ecard-host .cert-benefits .b-note {
+    column-span: all;
+    margin-top: 1.5mm; padding-top: 1.5mm;
+    border-top: 1px dashed var(--a1-25);
+    font-size: 8px; color: rgba(255,255,255,0.38); letter-spacing: 0.05em;
+  }
+  .ecard-host .cert-benefits:empty, .ecard-host .cert-benefits.empty { display: none; }
+
+  .ecard-host .cert-footer {
+    flex-shrink: 0;
+    display: flex; justify-content: space-between; align-items: flex-end;
+    padding: 0 4mm 2mm;
+  }
+  .ecard-host .sig-block { text-align: left; }
+  .ecard-host .sig-line {
+    font-family: 'EDIX', 'Segoe Script', 'Snell Roundhand', cursive;
+    font-size: 34px; color: #fff;
+    text-shadow: 0 0 10px rgba(255,255,255,0.4);
+    border-bottom: 1px solid rgba(255,255,255,0.35);
+    padding: 0 12mm 2mm 2mm; display: inline-block;
+    min-width: 52mm; min-height: 14mm;
+  }
+  .ecard-host .sig-role { color: rgba(255,255,255,0.5); font-size: 12px; margin-top: 3mm; letter-spacing: 0.15em; }
+  .ecard-host .sig-date { color: rgba(255,255,255,0.5); font-size: 12px; margin-top: 1.5mm; letter-spacing: 0.1em; }
+  .ecard-host .qr-block { text-align: center; }
+  .ecard-host .qr-box {
+    width: 26mm; height: 26mm; margin: 0 auto;
+    background: #fff; border-radius: 2mm; padding: 1.5mm;
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 0 18px var(--a1-45);
+  }
+  .ecard-host .qr-box img, .ecard-host .qr-box canvas { width: 100% !important; height: 100% !important; display:block; }
+  .ecard-host .qr-id { margin-top: 1.5mm; font-size: 10px; line-height: 1.3; color: rgba(255,255,255,0.6); letter-spacing: 0.06em; }
+  .ecard-host .qr-tip { margin-top: 1.5mm; font-size: 9.5px; color: var(--a1-90); letter-spacing: 0.2em; }
+
+  /* ============ 大师课模式：白纸黑字，紫金点缀 ============ */
+  .ecard-host .cert.master { color: #1a1a1a; }
+  .ecard-host .cert.master {
+    background:
+      radial-gradient(ellipse 85% 65% at 100% 0%, var(--glow1), transparent 62%),
+      radial-gradient(ellipse 85% 65% at 0% 100%, var(--glow2), transparent 62%),
+      linear-gradient(135deg, var(--bg1) 0%, var(--bg2) 50%, var(--bg3) 100%);
+  }
+  .ecard-host .cert.master .cert-divider { background: linear-gradient(90deg, transparent, rgba(0,0,0,0.55), rgba(0,0,0,0.3), transparent); }
+  .ecard-host .cert.master .watermark { color: rgba(0,0,0,0.06); }
+  .ecard-host .cert.master .cert-logo { color: #111; text-shadow: 0 0 10px rgba(0,0,0,0.18); }
+  .ecard-host .cert.master .cert-en { color: rgba(0,0,0,0.42); }
+  .ecard-host .cert.master .cert-title {
+    background: linear-gradient(135deg, #5a5a5a, #1a1a1a 65%);
+    -webkit-background-clip: text; background-clip: text;
+    filter: drop-shadow(0 0 10px rgba(201,162,39,0.30));
+  }
+  .ecard-host .cert.master .cert-present { color: rgba(0,0,0,0.5); }
+  .ecard-host .cert.master .cert-name { color: #111; text-shadow: 0 0 18px rgba(212,175,55,0.40); }
+  .ecard-host .cert.master .cert-text { color: rgba(0,0,0,0.72); }
+  .ecard-host .cert.master .skill-pill { color: #1a1a1a; background: transparent; border-color: rgba(0,0,0,0.55); }
+  .ecard-host .cert.master .cert-benefits { background: rgba(0,0,0,0.03); border-color: rgba(0,0,0,0.25); color: rgba(0,0,0,0.78); }
+  .ecard-host .cert.master .cert-benefits .b-note { color: rgba(0,0,0,0.42); border-top-color: rgba(0,0,0,0.18); }
+  .ecard-host .cert.master .sig-line { color: #111; text-shadow: none; border-bottom-color: rgba(0,0,0,0.45); }
+  .ecard-host .cert.master .sig-role, .ecard-host .cert.master .sig-date { color: rgba(0,0,0,0.52); }
+  .ecard-host .cert.master .qr-box { border: 1px solid rgba(0,0,0,0.18); box-shadow: 0 0 16px rgba(212,175,55,0.35); }
+  .ecard-host .cert.master .qr-id { color: rgba(0,0,0,0.62); }
+  .ecard-host .cert.master .qr-tip { color: #A08420; }
+  .ecard-host .cert.master::after {
+    border-color: rgba(0,0,0,0.22);
+    background:
+      linear-gradient(135deg, #1a1a1a, #6a6a6a) top left / 22mm 1.2px,
+      linear-gradient(135deg, #1a1a1a, #6a6a6a) top left / 1.2px 22mm,
+      linear-gradient(315deg, #1a1a1a, #6a6a6a) bottom right / 22mm 1.2px,
+      linear-gradient(315deg, #1a1a1a, #6a6a6a) bottom right / 1.2px 22mm;
+    background-repeat: no-repeat;
+  }
+
+  /* ============ 竖版覆盖 ============ */
+  .ecard-host .cert.portrait { width: 210mm; height: 297mm; }
+  .ecard-host .cert.portrait .watermark { font-size: 64mm; }
+  .ecard-host .cert.portrait .cert-title { font-size: 42px; margin-top: 10mm; }
+  .ecard-host .cert.portrait .cert-name { font-size: 46px; }
+  .ecard-host .cert.portrait .cert-body { padding: 4mm 10mm; }
+  .ecard-host .cert.portrait .cert-benefits {
+    columns: 2; column-gap: 8mm; font-size: 12.5px; line-height: 2;
+    max-height: none; overflow: visible;
+    padding: 4mm 6mm 3mm; margin: 0 4mm 6mm;
+  }
+  .ecard-host .cert.portrait .cert-benefits h4 { font-size: 11px; }
+  .ecard-host .cert.portrait .cert-benefits .b-note { font-size: 9.5px; margin-top: 2.5mm; padding-top: 2mm; }
+
+
+  /* ===== 黑白模式（讲师资格证专用）===== */
+  .ecard-host .pass-card.bw-mode {
+    background: #fff !important;
+    color: #111 !important;
+    box-shadow: 0 10px 40px rgba(0,0,0,0.12);
+  }
+  .ecard-host .pass-card.bw-mode .pass-logo { color: #111; text-shadow: none; }
+  .ecard-host .pass-card.bw-mode .pass-title { color: #111; }
+  .ecard-host .pass-card.bw-mode .pass-name { color: #111; }
+  .ecard-host .pass-card.bw-mode .pass-role { color: #111; }
+  .pass-card.bw-mode .pass-id,
+  .pass-card.bw-mode .pass-date,
+  .ecard-host .pass-card.bw-mode .pass-hex { color: #111 !important; }
+  .ecard-host .pass-card.bw-mode .pass-swatch { border-color: #111; }
+  .ecard-host .pass-card.bw-mode .pass-qr { border: 1px solid #111; }
+  .ecard-host .pass-card.bw-mode .pass-qr-tip { color: #111; }
+  /* 背景logo浮在最上面（z-index:3 > pass-inner:2），叠加时反相 */
+  .ecard-host .pass-card.bw-mode .pass-mark {
+    z-index: 3;
+    color: #FFFFFF;
+    mix-blend-mode: difference;
+  }
+  .ecard-host .pass-card.bw-mode .pass-inner {
+    z-index: 2;
+  }
+
+  /* ===== ecard extras: host / scale / verified-stamp / font ===== */
+  .ecard-host { width: 100%; position: relative; }
+  .ecard-scale { position: absolute; top: 0; left: 0; transform-origin: top left; }
+  .ecard-host .cert, .ecard-host .pass-card { font-family: 'Avenir Next', Avenir, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans SC', sans-serif; }
+  .ecard-host .vstamp { width: 100%; height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; font-weight: 800; line-height: 1; }
+  .ecard-host .qr-box .vstamp { font-size: 30px; }
+  .ecard-host .pass-qr .vstamp { font-size: 15px; }
+  .ecard-host .vstamp .vstamp-t { font-size: 8px; letter-spacing: 0.1em; margin-top: 2px; font-weight: 700; }
+
+  /* ===== 背面流光：主题色光晕缓慢流动（--f1/--f2 由 JS 按主题注入）===== */
+  .ecard-host .ecard-glow {
+    position: absolute; inset: -13px; z-index: 0;
+    border-radius: 18px;
+    background: linear-gradient(120deg, var(--f1, #7B2CBF), var(--f2, #4A90E2), var(--f1, #7B2CBF));
+    background-size: 300% 300%;
+    filter: blur(16px);
+    opacity: 0.3;
+    animation: ecard-flow 9s ease-in-out infinite;
+    pointer-events: none;
+  }
+  .ecard-host.master .ecard-glow { opacity: 0.38; }
+  .ecard-host.mono .ecard-glow { opacity: 0.2; }
+  .ecard-host .cert, .ecard-host .pass-card { position: relative; z-index: 1; }
+  @keyframes ecard-flow {
+    0% { background-position: 0% 50%; }
+    50% { background-position: 100% 50%; }
+    100% { background-position: 0% 50%; }
+  }
+
+  /* ===== 卡面扫光：极淡斜向光束，约 7 秒慢扫一次 ===== */
+  .ecard-host .ecard-sheen {
+    position: absolute; inset: 0; z-index: 5;
+    pointer-events: none;
+    border-radius: inherit;
+    background: linear-gradient(115deg,
+      transparent 40%,
+      rgba(255,255,255,0.05) 46%,
+      rgba(255,255,255,0.14) 50%,
+      rgba(255,255,255,0.05) 54%,
+      transparent 60%);
+    background-size: 280% 100%;
+    background-position: 135% 0;
+    mix-blend-mode: screen;
+    animation: ecard-sheen 7s ease-in-out infinite;
+  }
+  .ecard-host .cert .ecard-sheen { border-radius: 0; }
+  @keyframes ecard-sheen {
+    0%, 52% { background-position: 135% 0; }
+    88%, 100% { background-position: -35% 0; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .ecard-host .ecard-glow, .ecard-host .ecard-sheen { animation: none; }
+  }
+
+  /* ===== 地铁站式进度轨道：节点压线，填充到当前站 ===== */
+  .metro { --m1: #7B2CBF; --m2: #4A90E2; }
+  .metro-top { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 16px; }
+  .metro-label { font-size: 14px; font-weight: 700; color: #fff; letter-spacing: 0.04em; }
+  .metro-pct {
+    font-family: 'EDIX', 'Avenir Next', sans-serif; font-size: 18px; font-weight: 700;
+    background: linear-gradient(90deg, var(--m1), var(--m2));
+    -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+  }
+  .metro-rail { position: relative; height: 52px; margin: 0 11px; }
+  .metro-line {
+    position: absolute; left: 0; right: 0; top: 9px; height: 4px; border-radius: 2px;
+    background: rgba(255,255,255,0.08);
+  }
+  .metro-fill {
+    position: absolute; left: 0; top: 9px; height: 4px; border-radius: 2px;
+    background: linear-gradient(90deg, var(--m1), var(--m2));
+    box-shadow: 0 0 10px var(--m1);
+    transition: width 0.8s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+  .metro-stop { position: absolute; top: 0; transform: translateX(-50%); width: 76px; text-align: center; }
+  .metro-dot {
+    width: 22px; height: 22px; margin: 0 auto; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 10.5px; font-weight: 700; font-family: 'EDIX', 'Avenir Next', sans-serif;
+    background: rgba(255,255,255,0.05); border: 1.5px solid rgba(255,255,255,0.18);
+    color: rgba(255,255,255,0.35);
+    position: relative; z-index: 1;
+    transition: all 0.3s;
+  }
+  .metro-stop.done .metro-dot {
+    background: rgba(255,255,255,0.14); border-color: rgba(255,255,255,0.75); color: #fff;
+  }
+  .metro-stop.current .metro-dot {
+    background: var(--m1); border-color: var(--m1); color: #fff;
+    box-shadow: 0 0 14px var(--m1);
+  }
+  .metro-stop.current .metro-dot::after {
+    content: ""; position: absolute; inset: -5px; border-radius: 50%;
+    border: 1.5px solid var(--m1);
+    animation: metro-pulse 2s ease-out infinite;
+  }
+  @keyframes metro-pulse {
+    0% { transform: scale(0.8); opacity: 0.9; }
+    100% { transform: scale(1.7); opacity: 0; }
+  }
+  .metro-name {
+    margin-top: 7px; font-size: 10.5px; line-height: 1.3; letter-spacing: 0.04em;
+    color: rgba(255,255,255,0.38);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .metro-stop.done .metro-name { color: rgba(255,255,255,0.7); }
+  .metro-stop.current .metro-name { color: #fff; font-weight: 600; }
+  @media (prefers-reduced-motion: reduce) {
+    .metro-stop.current .metro-dot::after { animation: none; opacity: 0; }
+    .metro-fill { transition: none; }
+  }
+#cardContainer { margin-bottom: 20px; }
+
+  /* ========== 进度条 ========== */
+  .progress-section { background:rgba(255,255,255,0.04); border:1px solid rgba(123,44,191,0.2); border-radius:16px; padding:20px; margin-bottom:16px; }
+  .progress-section h3 { font-family:'EDIX',sans-serif; font-size:12px; letter-spacing:0.1em; text-transform:uppercase; color:rgba(255,255,255,0.5); margin-bottom:14px; }
+
+
+  /* ========== 留言 ========== */
+  .message-section { background:rgba(255,255,255,0.04); border:1px solid rgba(123,44,191,0.2); border-radius:16px; padding:20px; margin-bottom:16px; }
+  .message-section h3 { font-family:'EDIX',sans-serif; font-size:12px; letter-spacing:0.1em; text-transform:uppercase; color:#C084FC; margin-bottom:10px; }
+  .message-section p { font-size:13px; line-height:1.8; color:rgba(255,255,255,0.6); white-space:pre-wrap; }
+
+  .admin-toggle {
+    margin-top: 34px; font-size: 12px; color: #9B59B6; cursor: pointer;
+    letter-spacing: 0.3em; user-select: none;
+  }
+  .admin-toggle:hover { color: #C084FC; text-shadow: 0 0 8px rgba(123,44,191,0.6); }
+  .admin {
+    margin-top: 16px; width: 100%; max-width: 520px;
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(123,44,191,0.25);
+    border-radius: 16px; padding: 24px; display: none;
+  }
+  .admin.open { display: block; }
+  .admin h3 { color:#fff; font-size:15px; letter-spacing:0.2em; margin-bottom:4px; }
+  .admin .desc { font-size:11px; color:#777; line-height:1.8; margin-bottom:16px; }
+  .admin label { display:block; font-size:11px; color:#888; margin:12px 0 6px; }
+  .admin input {
+    width:100%; background: rgba(255,255,255,0.06);
+    border:1px solid rgba(123,44,191,0.35); border-radius:10px;
+    padding:10px 12px; color:#fff; font-size:13px; outline:none;
+    font-family: ui-monospace, Consolas, monospace;
+  }
+  .admin input:focus { border-color:#7B2CBF; }
+  .admin .row { display:flex; gap:10px; }
+  .admin .row > * { flex:1; }
+  .admin .file-btn {
+    display:block; text-align:center; cursor:pointer;
+    border:1px dashed rgba(123,44,191,0.5); border-radius:10px;
+    padding:12px; font-size:13px; color:#C084FC; margin-top:4px;
+  }
+  .admin .file-btn:hover { background: rgba(123,44,191,0.1); }
+  .admin .count { font-size:12px; color:#9B59B6; margin-top:14px; letter-spacing:0.1em; }
+  .entry {
+    display:flex; align-items:center; gap:8px;
+    padding:9px 4px; border-bottom:1px solid rgba(255,255,255,0.05); font-size:12.5px;
+  }
+  .entry .eid { color:#C084FC; font-family:ui-monospace,Consolas,monospace; white-space:nowrap; }
+  .entry .ename { color:#ddd; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .entry .enote { color:#777; font-size:11px; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .badge { font-size:10px; padding:2px 8px; border-radius:20px; white-space:nowrap; }
+  .badge.ok { background:rgba(46,204,113,0.15); color:#2ECC71; border:1px solid rgba(46,204,113,0.4); }
+  .badge.bad { background:rgba(231,76,60,0.15); color:#E74C3C; border:1px solid rgba(231,76,60,0.4); }
+  .entry-actions { display:flex; gap:6px; }
+  .icon-btn {
+    background:transparent; border:1px solid rgba(255,255,255,0.15); color:#999;
+    border-radius:8px; padding:3px 9px; font-size:11px; cursor:pointer;
+  }
+  .icon-btn:hover { border-color:#7B2CBF; color:#C084FC; }
+  .admin .export-row { display:flex; gap:10px; margin-top:18px; }
+  .admin .export-row .btn { flex:1; }
+
+  #langBtn {
+    position: fixed; top: 14px; right: 16px; z-index: 9999;
+    background: rgba(255,255,255,0.06); color: #C084FC;
+    border: 1px solid rgba(123,44,191,0.5); border-radius: 50px;
+    padding: 6px 16px; font-size: 12px; font-weight: bold; cursor: pointer;
+    letter-spacing: 1px;
+  }
+  #langBtn:hover { border-color: #7B2CBF; box-shadow: 0 0 10px rgba(123,44,191,0.4); }
+
+  .foot { margin-top: 40px; font-size: 11px; color: rgba(255,255,255,0.25); letter-spacing: 0.2em; }
+</style>
+</head>
+<body>
+
+<div class="logo">Eonun</div>
+<div class="sub">Certificate Verification</div>
+<button id="langBtn" onclick="toggleLang()">EN</button>
+
+<div class="panel">
+  <label data-i18n="panel_label">证书编号 + 校验码（扫码得到的字符串，或从证书右下角手动输入）</label>
+  <input id="payload" data-i18n-ph="placeholder" placeholder="EON-2026-0001.9A31C…（编号.128位签名）" spellcheck="false">
+  <button class="btn" onclick="verify()" data-i18n="verify_btn">验 证</button>
+</div>
+
+<div class="result" id="result">
+  <div class="icon" id="r-icon"></div>
+  <h2 id="r-title"></h2>
+  <div class="meta" id="r-meta"></div>
+  <div class="note" id="r-note"></div>
+</div>
+
+<div class="render-area" id="renderArea" style="display:none">
+  <div id="cardContainer"></div>
+  <div id="progressContainer"></div>
+  <div id="messageContainer"></div>
+</div>
+
+<div class="admin-toggle" onclick="openAdmin()">▾ 管理功能（仅本地副本 · 公开网页自动隐藏）</div>
+
+<div class="admin" id="adminPanel">
+  <h3>管理功能</h3>
+  <div class="desc">
+    <b>模式约定</b>：本页面<b>本地双击打开</b>时可管理；上传到网站后，公开副本自动隐藏此入口、只保留验证功能。签名私钥从不进入本页面。<br><br>
+    <b>统一名单</b>：JSON 格式（编号、姓名、状态、备注），由登记程序生成。状态分为三种：「active」= 已激活（白名单）、「revoked」= 已注销（黑名单）、「inactive」= 未激活。验证时自动比对。<br>
+    <b>在线同步</b>：将登记程序导出的 registry.json 上传 GitHub（与验证页同目录），所有在线访客自动同步名单。<br>
+    <b>公钥</b>：内置公钥随页面分发；本地追加的公钥只影响本浏览器。
+  </div>
+
+  <label>导入统一名单（.json）</label>
+  <label class="file-btn">选择文件…<input type="file" id="regFile" accept=".json" style="display:none" onchange="importRegistry(this)"></label>
+
+  <div class="count" id="regCount">名单未加载</div>
+  <div id="regList"></div>
+
+  <label>公钥管理（内置基线 ∪ keys.json ∪ 本地追加 · 合并去重）</label>
+  <div class="count" id="pubCount"></div>
+  <div id="pubList"></div>
+  <div class="row" style="margin-top:10px">
+    <input id="n-pub" placeholder="粘贴新公钥（04 开头，130 位十六进制）">
+  </div>
+  <div class="row" style="margin-top:10px">
+    <label class="btn plain" style="cursor:pointer;text-align:center;flex:1" title="选择生成器导出的私钥备份 JSON 或 keys.json，自动提取其中的公钥（私钥被忽略，绝不保存）">⇪ 导入公钥文件<input type="file" accept=".json" style="display:none" onchange="importPubFile(this)"></label>
+    <button class="btn plain" style="flex:1" onclick="addPub()">✎ 手动添加</button>
+  </div>
+
+  <div class="export-row">
+    <button class="btn plain" onclick="closeAdmin()">收起</button>
+  </div>
+</div>
+
+<div class="foot">SECURED BY ECDSA P-256 · PUBLIC-KEY SIGNATURE · VERIFY OFFLINE</div>
+
+<script>
+/* ---------- 中英切换 ---------- */
+const I18N = {
+  zh: {
+    panel_label: '证书编号 + 校验码（扫码得到的字符串，或从证书右下角手动输入；支持完整二维码链接）',
+    placeholder: 'EON-2026-0001.9A31C…（编号.签名，v2 为 编号.签名.钥匙）',
+    verify_btn: '验 证',
+    fmt_title: '格式无效',
+    fmt_meta: '请输入 <b>编号.签名</b> 格式的完整字符串（签名为 128 位十六进制）',
+    step_sig: '① 数字签名',
+    step_reg: '② 登记状态',
+    step_dec: '③ 加密内容',
+    st_active: '已激活',
+    st_revoked: '已注销',
+    st_inactive: '未激活',
+    dec_ok: '解密成功',
+    dec_none: '未找到或无法解密',
+    dec_none_note: '签名与登记均真实；加密内容缺失可能是 .bin 未上传或钥匙不匹配，卡面细节以纸质证书为准。',
+    prog_title: '课程进度',
+    msg_title: '教师留言',
+    fail_title: '验证失败',
+    fail_note: '本页面仅使用公钥验签，任何人均可安全使用。如确认输入无误，请联系发证方核实。',
+    valid_title: '证书有效',
+    revoked_title: '证书已注销',
+    revoked_note: '注销备注：{note}<br>本证书及关联回馈权益已失效。',
+    valid_meta_reg: '证书编号<br><b>{id}</b>（{name}）<br>数字签名校验通过 · 登记状态：正常',
+    valid_meta_bare: '证书编号<br><b>{id}</b><br>数字签名校验通过',
+    reg_note_prefix: '登记备注：',
+    bare_note: '发证方未启用登记册或未收录该编号，本结果仅证明签名真实。如证书已挂失，请以发证方记录为准。',
+    active_title: '证书未激活',
+    active_note: '该证书签名真实，但当前未在激活名单中。请联系发证方核实。',
+    admin_toggle: '▾ 管理功能（仅本地副本 · 公开网页自动隐藏）',
+    admin_h3: '管理功能',
+    admin_desc: '<b>模式约定</b>：本页面<b>本地双击打开</b>时可管理；上传到网站后，公开副本自动隐藏此入口、只保留验证功能。签名私钥从不进入本页面。<br><br><b>统一名单</b>：JSON 格式（编号、姓名、状态、备注），由登记程序生成。状态分为三种：「active」= 已激活（白名单）、「revoked」= 已注销（黑名单）、「inactive」= 未激活。验证时自动比对。<br><b>在线同步</b>：将登记程序导出的 registry.json 上传 GitHub（与验证页同目录），所有在线访客自动同步名单。<br><b>公钥</b>：内置公钥随页面分发；本地追加的公钥只影响本浏览器。',
+    reg_import_label: '导入统一名单（.json）',
+    choose_file: '选择文件…',
+    reg_empty: '名单为空',
+    reg_count: '已加载 {n} 条记录',
+    add_label: '新增记录（发证后登记）',
+    ph_id: '证书编号',
+    ph_name: '学员姓名',
+    add_btn: '＋ 添加',
+    pub_label: '公钥管理（内置基线 ∪ keys.json ∪ 本地追加 · 合并去重 · 在线页面另读同目录 keys.json，GitHub 上传该文件即可加公信公钥）',
+    pub_count: '共 {n} 把公钥（内置 {e} + 本地 {l}）· 本地修改跨重启保留',
+    ph_pub: '粘贴新公钥（04 开头，130 位十六进制）',
+    add_pub_btn: '＋ 添加公钥',
+    export_reg: '⬇ 导出登记册（保存覆盖原文件）',
+    close_btn: '收起',
+    prompt_revoke: '注销原因（会写入登记册备注，并展示给验证者）：',
+    alert_need_id: '请填证书编号',
+    confirm_del_reg: '确定从登记册删除 {id}？',
+    alert_pub_fmt: '格式不对：需要 04 开头的 130 位十六进制。',
+    alert_pub_curve: '公钥不在曲线上，请检查是否复制完整。',
+    alert_pub_dup: '这把公钥已在列表中。',
+    alert_pub_added: '已添加。此公钥仅保存在本浏览器；如需让所有人信任它，请把它追加进页面代码顶部的 PUBLIC_KEYS 后重新分发/上传页面。',
+    confirm_del_pub: '从本地列表移除这把公钥？（内置公钥不可在此删除，需修改页面代码）'
+  },
+  en: {
+    panel_label: 'Certificate ID + signature (from scanning the QR code, or typed manually; full QR links accepted)',
+    placeholder: 'EON-2026-0001.9A31C… (ID.signature; v2: ID.signature.key)',
+    verify_btn: 'VERIFY',
+    fmt_title: 'Invalid format',
+    fmt_meta: 'Enter the full string as <b>ID.SIGNATURE</b> (signature = 128 hex characters)',
+    step_sig: '① Signature',
+    step_reg: '② Registry',
+    step_dec: '③ Encrypted content',
+    st_active: 'active',
+    st_revoked: 'revoked',
+    st_inactive: 'not activated',
+    dec_ok: 'decrypted',
+    dec_none: 'not found / cannot decrypt',
+    dec_none_note: 'Signature and registry are genuine; encrypted content missing (bin not uploaded or key mismatch). Refer to the printed certificate.',
+    prog_title: 'Course Progress',
+    msg_title: "Teacher's Message",
+    fail_title: 'Verification failed',
+    fail_note: 'This page verifies with public keys only and is safe for anyone to use. If the input is correct, please contact the issuer.',
+    valid_title: 'Certificate Valid',
+    revoked_title: 'Certificate revoked',
+    revoked_note: 'Revocation note: {note}<br>This certificate and its associated benefits are void.',
+    valid_meta_reg: 'Certificate ID<br><b>{id}</b> ({name})<br>Signature verified · Registry: active',
+    valid_meta_bare: 'Certificate ID<br><b>{id}</b><br>Signature verified',
+    reg_note_prefix: 'Registry note: ',
+    bare_note: 'The issuer has not enabled the registry or has not recorded this ID; this result only confirms the signature. For lost or revoked certificates, refer to the issuer\'s own records.',
+    active_title: 'Certificate not activated',
+    active_note: 'The signature is genuine, but this certificate is not in the active list. Please contact the issuer.',
+    admin_toggle: '▾ Admin (local copy only · hidden on the public page)',
+    admin_h3: 'Admin',
+    admin_desc: '<b>Mode</b>: this page is manageable when opened <b>locally</b> (double-click); once hosted, the public copy hides this panel and only verifies. The signing private key never enters this page.<br><br><b>Unified registry</b>: JSON format (ID, Name, Status, Notes), generated by the registration program. Status has three values: "active" = activated (whitelist), "revoked" = revoked (blacklist), "inactive" = not activated. Automatically checked during verification.<br><b>Online sync</b>: upload registry.json exported from the registration program to GitHub (same directory as verify.html), all online visitors automatically sync.<br><b>Public keys</b>: built-in keys ship with the page; locally added keys affect only this browser.',
+    reg_import_label: 'Import unified registry (.json)',
+    choose_file: 'Choose file…',
+    reg_empty: 'Registry is empty',
+    reg_count: '{n} entries loaded',
+    add_label: 'Add entry (after issuing)',
+    ph_id: 'Certificate ID',
+    ph_name: 'Student name',
+    add_btn: '＋ Add',
+    pub_label: 'Public keys (built-in baseline ∪ keys.json ∪ local additions · merged & deduped · the online page also reads keys.json from the same directory — upload that file to GitHub to add trusted keys without touching code)',
+    pub_count: '{n} public keys (built-in {e} + local {l}) · local changes persist across restarts',
+    ph_pub: 'Paste new public key (04 + 130 hex chars)',
+    add_pub_btn: '＋ Add public key',
+    export_reg: '⬇ Export registry (save over your file)',
+    close_btn: 'Close',
+    prompt_revoke: 'Revocation reason (written into the registry notes and shown to verifiers):',
+    alert_need_id: 'Please enter a certificate ID',
+    confirm_del_reg: 'Delete {id} from the registry?',
+    alert_pub_fmt: 'Invalid format: 04 followed by 130 hexadecimal characters.',
+    alert_pub_curve: 'The public key is not on the curve — check that it was copied completely.',
+    alert_pub_dup: 'This public key is already listed.',
+    alert_pub_added: 'Added. This key is stored only in this browser; to make it trusted by everyone, add it to PUBLIC_KEYS at the top of this file and re-publish.',
+    confirm_del_pub: 'Remove this key from the local list? (Built-in keys can only be removed by editing the page code)'
+  }
+};
+let LANG = 'zh';
+function t(k){ return (I18N[LANG] && I18N[LANG][k]) || I18N.zh[k] || k; }
+function tf(k, vars){ let s = t(k); Object.keys(vars).forEach(v => { s = s.split('{'+v+'}').join(vars[v]); }); return s; }
+function toggleLang(){
+  LANG = (LANG === 'zh') ? 'en' : 'zh';
+  try { localStorage.setItem('eonun_lang_v1', LANG); } catch(e) {}
+  applyLang();
+}
+function applyLang(){
+  document.querySelectorAll('[data-i18n]').forEach(el => { el.textContent = t(el.dataset.i18n); });
+  document.querySelectorAll('[data-i18n-ph]').forEach(el => { el.placeholder = t(el.dataset.i18nPh); });
+  document.querySelectorAll('[data-i18n-html]').forEach(el => { el.innerHTML = t(el.dataset.i18nHtml); });
+  const lb = document.getElementById('langBtn');
+  if (lb) lb.textContent = (LANG === 'zh') ? 'EN' : '中';
+  renderRegistry();
+  renderPubAdmin();
+  const r = document.getElementById('result');
+  if (r && (r.classList.contains('ok') || r.classList.contains('bad') || r.classList.contains('warn'))) {
+    try { verify(); } catch(e) {}
+  }
+}
+
+/* ================= 验证逻辑 ================= */
+function verify() {
+  const raw0 = document.getElementById('payload').value.trim();
+  const r = document.getElementById('result');
+  // 允许直接粘贴整个二维码 URL：只取 # 后面的负载
+  const raw = raw0.indexOf('#') >= 0 ? raw0.split('#').pop().trim() : raw0;
+  // v2 格式: 编号.128位签名.64位学生钥匙
+  const v2m = raw.match(/^([A-Za-z0-9\-]+)\.([A-Fa-f0-9]{128})\.([A-Fa-f0-9]{64})$/);
+  if (v2m) { verifyV2(v2m[1].toUpperCase(), v2m[2].toUpperCase(), v2m[3].toLowerCase()); return; }
+  // v1 格式: 编号.128位签名
+  const m = raw.toUpperCase().match(/^([A-Z0-9\-]+)[.\s]+([A-F0-9]{128})$/);
+  if (!m) { r.className = 'result bad'; setR('✕', t('fmt_title'), t('fmt_meta'), ''); return; }
+  verifyV1(m[1], m[2]);
+}
+function verifyV1(id, sig) {
+  const r = document.getElementById('result');
+  document.getElementById('renderArea').style.display = 'none';
+  let pub = ''; try { pub = ecVerifyAny(id, sig); } catch(e) { pub = ''; }
+  if (!pub) { r.className = 'result bad'; setR('✕', t('fail_title'), 'Certificate ID<br><b>' + id + '</b><br>' + (LANG==='zh' ? '签名校验不通过' : 'Signature check failed'), t('fail_note')); return; }
+  const entry = unifiedRegistry.get(id);
+  const namePart = (entry && entry.name) ? (LANG === 'zh' ? '（' + esc(entry.name) + '）' : ' (' + esc(entry.name) + ')') : '';
+  const status = entry ? entry.status : 'inactive';
+  if (status === 'revoked') { r.className = 'result warn'; setR('⚠', t('revoked_title'), (LANG==='zh'?'证件编号<br><b>'+id+'</b>'+namePart+'<br>数字签名真实，但已注销':'Document ID<br><b>'+id+'</b>'+namePart+'<br>Signature genuine, revoked'), entry.note?tf('revoked_note',{note:esc(entry.note)}):(LANG==='zh'?'<br>本证件已失效。':'<br>Void.')); }
+  else if (status === 'active') { r.className = 'result ok'; setR('✓', t('valid_title'), (LANG==='zh'?'证件编号<br><b>'+id+'</b>'+namePart+'<br>签名校验通过 · 已激活':'Document ID<br><b>'+id+'</b>'+namePart+'<br>Verified · Active'), entry.note?t('reg_note_prefix')+esc(entry.note):''); }
+  else { r.className = 'result warn'; setR('⚠', t('active_title'), (LANG==='zh'?'证件编号<br><b>'+id+'</b>'+namePart+'<br>签名真实，但未激活':'Document ID<br><b>'+id+'</b>'+namePart+'<br>Genuine, inactive'), t('active_note')); }
+}
+/* v2：三层验证（签名 → 登记状态 → ECDH 解密），步骤可视化 */
+async function verifyV2(id, sig, sk) {
+  const r = document.getElementById('result');
+  const ra = document.getElementById('renderArea');
+  ra.style.display = 'none';
+  const stLabel = { active: t('st_active'), revoked: t('st_revoked'), inactive: t('st_inactive') };
+  // 第 1 层：ECDSA 签名验证（同时拿到对应的教师公钥）
+  let pub = ''; try { pub = ecVerifyAny(id, sig); } catch(e) { pub = ''; }
+  if (!pub) {
+    r.className = 'result bad';
+    setR('✕', t('fail_title'), 'ID: <b>' + esc(id) + '</b><br>' + t('step_sig') + ' ✕', t('fail_note'));
+    return;
+  }
+  // 第 2 层：registry 状态查询
+  const entry = unifiedRegistry.get(id);
+  const status = entry ? entry.status : 'inactive';
+  const namePart = (entry && entry.name) ? (LANG === 'zh' ? '（' + esc(entry.name) + '）' : ' (' + esc(entry.name) + ')') : '';
+  if (status === 'revoked') {
+    r.className = 'result warn';
+    setR('⚠', t('revoked_title'),
+      'ID: <b>' + esc(id) + '</b>' + namePart + '<br>' + t('step_sig') + ' ✓<br>' + t('step_reg') + ' ⚠ ' + stLabel.revoked,
+      entry.note ? tf('revoked_note', { note: esc(entry.note) }) : '');
+    return;
+  }
+  // 第 3 层：ECDH + AES-GCM 解密（先用验签通过的那把公钥，失败再试其余公钥，兼容换钥）
+  let decrypted = null;
+  try { decrypted = await decryptMessage(sk, pub); } catch(e) { decrypted = null; }
+  const steps = t('step_sig') + ' ✓<br>'
+    + t('step_reg') + ' ' + (status === 'active' ? '✓ ' : '⚠ ') + stLabel[status] + '<br>'
+    + t('step_dec') + ' ' + (decrypted ? '✓ ' + t('dec_ok') : '— ' + t('dec_none'));
+  if (status === 'active') {
+    r.className = 'result ok';
+    setR('✓', t('valid_title'), 'ID: <b>' + esc(id) + '</b>' + namePart + '<br>' + steps, decrypted ? '' : t('dec_none_note'));
+  } else {
+    r.className = 'result warn';
+    setR('⚠', t('active_title'), 'ID: <b>' + esc(id) + '</b>' + namePart + '<br>' + steps, t('active_note'));
+  }
+  // 解密成功即渲染卡面 + 进度 + 留言（留言为空自动隐藏）；先显示容器再渲染，保证缩放测量准确
+  if (decrypted) {
+    ra.style.display = 'block';
+    applyPageTheme(decrypted.cardInfo || {});
+    ECARD.mount(document.getElementById('cardContainer'), decrypted.cardInfo || {}, id);
+    renderProgress(decrypted.nodes || [], decrypted.current || 0, decrypted.cardInfo || {});
+    renderMessage(decrypted.message || '');
+  }
+}
+/* 第三层：由学生私钥推导公钥 → 定位 .bin → 逐把教师公钥尝试 ECDH 解密 */
+async function decryptMessage(sk, firstPub) {
+  try {
+    if (!/^[0-9a-f]{64}$/.test(sk)) return null;
+    const stuPub = bytesToHex(window.NOBLE_P256.getPublicKey(sk, false));
+    const fname = (await sha256HexText(stuPub.toLowerCase())) + '.bin';
+    const resp = await fetch(fname, { cache: 'no-store' });
+    if (!resp.ok) return null;
+    const data = new Uint8Array(await resp.arrayBuffer());
+    if (data.length < 29) return null;   // 12 字节 IV + 16 字节校验码 + 至少 1 字节明文
+    const iv = data.slice(0, 12), cipher = data.slice(12);
+    const cand = [];
+    [firstPub].concat(allPubs()).forEach(p => {
+      p = String(p || '').trim().toLowerCase();
+      if (/^04[0-9a-f]{128}$/.test(p) && cand.indexOf(p) < 0) cand.push(p);
+    });
+    for (const pub of cand) {
+      try {
+        const shared = window.NOBLE_P256.getSharedSecret(sk, pub);
+        const keyBytes = await sha256Bytes(shared);
+        const aesKey = await crypto.subtle.importKey('raw', keyBytes, { name: 'AES-GCM' }, false, ['decrypt']);
+        const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: iv }, aesKey, cipher);
+        return JSON.parse(new TextDecoder().decode(plain));
+      } catch (e) {}
+    }
+    return null;
+  } catch (e) { return null; }
+}
+function setR(icon, title, meta, note) {
+  document.getElementById('r-icon').textContent = icon;
+  document.getElementById('r-title').textContent = title;
+  document.getElementById('r-meta').innerHTML = meta;
+  document.getElementById('r-note').innerHTML = note || '';
+}
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
+
+/* ================= 卡面渲染：EonunDH ecard 模块（与登记程序内嵌同一份代码） ================= */
+/** ecard.js - EonunDH 卡面渲染模块
+ *  从生成器提取的主题引擎 + 完整卡面 HTML，可嵌入 verify.html 和登记程序
+ *  用法：ECARD.mount(containerElement, info)
+ */
+(function() {
+  'use strict';
+
+  // ---------- 主题引擎（从生成器原样复制） ----------
+  function hexToHsl(hex) {
+    let r = parseInt(hex.slice(1,3),16)/255, gg = parseInt(hex.slice(3,5),16)/255, b = parseInt(hex.slice(5,7),16)/255;
+    const mx = Math.max(r,gg,b), mn = Math.min(r,gg,b);
+    let h = 0, s = 0; const l = (mx+mn)/2;
+    if (mx !== mn) {
+      const d = mx-mn;
+      s = l > 0.5 ? d/(2-mx-mn) : d/(mx+mn);
+      if (mx === r) h = ((gg-b)/d + (gg < b ? 6 : 0));
+      else if (mx === gg) h = (b-r)/d + 2;
+      else h = (r-gg)/d + 4;
+      h *= 60;
+    }
+    return {h:h, s:s*100, l:l*100};
+  }
+  function hslToHex(h, s, l) {
+    h = ((h % 360) + 360) % 360; s = Math.max(0, Math.min(100, s))/100; l = Math.max(0, Math.min(100, l))/100;
+    const c = (1 - Math.abs(2*l - 1)) * s;
+    const x = c * (1 - Math.abs(((h/60) % 2) - 1));
+    const m = l - c/2;
+    let rgb;
+    if (h < 60) rgb = [c,x,0]; else if (h < 120) rgb = [x,c,0];
+    else if (h < 180) rgb = [0,c,x]; else if (h < 240) rgb = [0,x,c];
+    else if (h < 300) rgb = [x,0,c]; else rgb = [c,0,x];
+    return '#' + rgb.map(function(v) { return Math.round((v+m)*255).toString(16).padStart(2,'0'); }).join('');
+  }
+  function rgba(hex, a) {
+    return 'rgba(' + parseInt(hex.slice(1,3),16) + ',' + parseInt(hex.slice(3,5),16) + ',' + parseInt(hex.slice(5,7),16) + ',' + a + ')';
+  }
+  function escapeHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
+  function normHex(c) { return /^#[0-9a-fA-F]{6}$/.test(c || '') ? c : '#7B2CBF'; }
+  function isMasterInfo(info) { return info.type === 'master' || String(info.color).toLowerCase() === 'master'; }
+  function isMonoInfo(info) { return info.type === 'mono' || String(info.color).toLowerCase() === 'black'; }
+
+  function applyTheme(certEl, isMaster, hex) {
+    let a1, a2, a1l, amid, a1xl, bg1, bg2, bg3, bgdot, glow1, glow2;
+    if (isMaster) {
+      a1 = '#1a1a1a'; a2 = '#C9A227'; a1l = '#4d4d4d'; amid = '#666666'; a1xl = '#1a1a1a';
+      bg1 = '#FFFFFF'; bg2 = '#F0F0F0'; bg3 = '#F8F8F8'; bgdot = '#F0F0F0';
+      glow1 = 'rgba(0,0,0,0.14)'; glow2 = 'rgba(0,0,0,0.10)';
+    } else {
+      const c = hexToHsl(hex);
+      a1  = hslToHex(c.h, c.s, c.l);
+      a2  = hslToHex(c.h - 55, Math.min(c.s, 72), Math.min(c.l + 7, 62));
+      a1l = hslToHex(c.h, Math.min(c.s + 10, 88), Math.min(c.l + 22, 74));
+      amid = hslToHex(c.h - 27, c.s, 58);
+      a1xl = hslToHex(c.h, Math.min(c.s + 5, 60), 87);
+      bg1 = hslToHex(c.h, c.s * 0.28, 7.5);
+      bg2 = hslToHex(c.h, c.s * 0.33, 10);
+      bg3 = hslToHex(c.h, c.s * 0.28, 8.5);
+      bgdot = hslToHex(c.h, c.s * 0.30, 11);
+      glow1 = rgba(a1, 0.18); glow2 = rgba(a2, 0.14);
+    }
+    var st = certEl.style;
+    st.setProperty('--a1', a1); st.setProperty('--a2', a2);
+    st.setProperty('--a1l', a1l); st.setProperty('--amid', amid); st.setProperty('--a1-xl', a1xl);
+    st.setProperty('--glow1', glow1); st.setProperty('--glow2', glow2);
+    st.setProperty('--bg1', bg1); st.setProperty('--bg2', bg2);
+    st.setProperty('--bg3', bg3); st.setProperty('--bgdot', bgdot);
+    st.setProperty('--a1-05', rgba(a1,0.05)); st.setProperty('--a1-15', rgba(a1,0.15));
+    st.setProperty('--a1-18', rgba(a1,0.18)); st.setProperty('--a1-25', rgba(a1,0.25));
+    st.setProperty('--a1-28', rgba(a1,0.28)); st.setProperty('--a1-45', rgba(a1,0.45));
+    st.setProperty('--a1-50', rgba(a1,0.5)); st.setProperty('--a1-55', rgba(a1,0.55));
+    st.setProperty('--a1-90', rgba(a1,0.9));
+    st.setProperty('--a2-30', rgba(a2,0.3)); st.setProperty('--a2-50', rgba(a2,0.5));
+    if (isMaster) st.setProperty('--txt-acc', '#9A7B0A');
+    else st.removeProperty('--txt-acc');
+  }
+
+  // ---------- 卡面 HTML 构造 ----------
+  function vstamp(theme) {
+    return '<div class="vstamp"><div style="color:' + (theme.accent) + '">✓</div><div class="vstamp-t" style="color:' + (theme.accent) + '">已验证 VERIFIED</div></div>';
+  }
+  function themeFor(info) {
+    var isMaster = isMasterInfo(info);
+    var isMono = isMonoInfo(info);
+    var hex = normHex(info.color);
+    return { isMaster: isMaster, isMono: isMono, hex: hex, accent: isMaster ? '#C9A227' : (isMono ? '#111' : hex) };
+  }
+
+  function htmlCert(info, stampHtml) {
+    var ti = info.title || '结业证书';
+    var name = info.name || '——';
+    var course = info.course || '课程';
+    var hours = info.hours || '';
+    var skills = (info.skills || '').split(/[,，]/).map(function(s){ return s.trim(); }).filter(Boolean);
+    var teacher = info.teacher || 'Eonun';
+    var date = info.date || '——';
+    var id = info.id || '——';
+    var btitle = info.btitle || '续修与进阶 · UPDATES & UPGRADES';
+    var note = info.note || '';
+    var lines = (info.benefits || '').split('\n').map(function(s){ return s.trim(); }).filter(Boolean);
+    var isMaster = isMasterInfo(info);
+    var ori = info.ori === 'portrait' ? 'portrait' : '';
+    var split = info.layout === 'extreme' && !ori ? 'split' : '';
+
+    var html = '<div class="cert ' + (isMaster ? 'master ' : '') + ori + ' ' + split + '">';
+    html += '<div class="watermark">Eonun</div>';
+    html += '<div class="cert-inner">';
+    html += '<div class="cert-logo">Eonun</div>';
+    html += '<div class="cert-en">Certificate of Completion</div>';
+    html += '<div class="cert-title">' + escapeHtml(ti.split('').join(' ')) + '</div>';
+    html += '<div class="cert-divider"></div>';
+    html += '<div class="cert-body">';
+    html += '<div class="cert-present">兹 证 明</div>';
+    html += '<div class="cert-name">' + escapeHtml(name) + '</div>';
+    html += '<div class="cert-text">已完成 <b>《' + escapeHtml(course) + '》</b> 全部教学内容' + (hours ? '，累计 <b>' + escapeHtml(String(hours)) + '</b> 课时' : '') + '，达到课程结业标准，特发此证。</div>';
+    if (skills.length) {
+      html += '<div class="cert-skills">' + skills.map(function(s){ return '<span class="skill-pill">' + escapeHtml(s) + '</span>'; }).join('') + '</div>';
+    }
+    html += '</div>';
+    html += '<div class="bottom-row">';
+    // benefits
+    if (lines.length) {
+      html += '<div class="cert-benefits">';
+      html += '<h4>' + escapeHtml(btitle) + '</h4>';
+      lines.forEach(function(s) { html += '<div class="b-line">' + escapeHtml(s).replace(/--(.+?)--/g, '<span class="b-gold">$1</span>') + '</div>'; });
+      if (note) html += '<div class="b-note">★ ' + escapeHtml(note) + '</div>';
+      html += '</div>';
+    }
+    html += '<div class="cert-footer">';
+    html += '<div class="sig-block"><div class="sig-line">' + escapeHtml(teacher) + '</div><div class="sig-role">课程讲师 · Course Instructor</div><div class="sig-date">颁发日期：' + escapeHtml(date) + '</div></div>';
+    html += '<div class="qr-block"><div class="qr-box">' + stampHtml + '</div><div class="qr-id">NO. ' + escapeHtml(id) + '<br><span style="font-size:9px;opacity:.7;">电子凭证</span></div><div class="qr-tip">已验证 VERIFIED</div></div>';
+    html += '</div>';
+    html += '</div>';
+    html += '</div>';
+    html += '<div class="ecard-sheen"></div>';
+    html += '</div>';
+    return html;
+  }
+
+  function htmlPass(info, stampHtml) {
+    var ti = info.title || '通行证 · PASS';
+    var name = info.name || '——';
+    var role = info.role || '';
+    var id = info.id || '——';
+    var date = info.date || '';
+    var isMaster = isMasterInfo(info);
+    var isMono = isMonoInfo(info);
+    var hexU = normHex(info.color);
+    var fg = isMono ? '#111' : (isMaster ? '#9A7B0A' : hexU);
+    var accent = isMono ? '#111' : (isMaster ? '#C9A227' : hexU);
+    var hexTxt = isMono ? '#BLACK · MONO' : (isMaster ? '#MASTER · MONO' : hexU.toUpperCase());
+    var markCol = isMono ? '' : (isMaster ? 'rgba(0,0,0,0.06)' : rgba(hexU, 0.06));
+
+    var html = '<div class="pass-card" style="color:' + fg + ';">';
+    html += '<div class="pass-mark" style="color:' + markCol + ';">Eonun</div>';
+    html += '<div class="pass-inner">';
+    html += '<div class="pass-head"><span class="pass-logo" style="color:' + fg + ';">EONUN</span><span class="pass-title">' + escapeHtml(ti) + '</span></div>';
+    html += '<div class="pass-main"><div class="pass-name">' + escapeHtml(name) + '</div><div class="pass-role">' + escapeHtml(role) + '</div></div>';
+    html += '<div class="pass-foot">';
+    html += '<div class="pass-meta"><div class="pass-id">NO. <span style="color:' + fg + ';">' + escapeHtml(id) + '</span></div><div class="pass-date">' + escapeHtml(date) + '</div><div class="pass-color"><span class="pass-swatch" style="background:' + accent + ';border-color:' + (isMono ? '#111' : 'rgba(255,255,255,0.3)') + ';"></span><span class="pass-hex" style="color:' + fg + ';">' + escapeHtml(hexTxt) + '</span></div></div>';
+    html += '<div class="pass-qr-wrap"><div class="pass-qr" style="border-color:' + (isMono ? '#111' : '') + ';">' + stampHtml + '</div><div class="pass-qr-tip" style="color:' + fg + ';">已验证</div></div>';
+    html += '</div>';
+    html += '</div>';
+    html += '<div class="ecard-sheen"></div>';
+    html += '</div>';
+    return html;
+  }
+
+  function htmlOther(info, stampHtml) {
+    var ti = info.title || '礼品卡 · Voucher';
+    var name = info.name || '——';
+    var role = info.role || '';
+    var id = info.id || '——';
+    var date = info.date || '';
+    var mark = info.mark || 'EONUN';
+    var isMaster = isMasterInfo(info);
+    var isMono = isMonoInfo(info);
+    var hexU = normHex(info.color);
+    var fg = isMono ? '#111' : (isMaster ? '#9A7B0A' : hexU);
+    var accent = isMono ? '#111' : (isMaster ? '#C9A227' : hexU);
+    var hexTxt = isMono ? '#BLACK · MONO' : (isMaster ? '#MASTER · MONO' : hexU.toUpperCase());
+    var markCol = isMono ? '' : (isMaster ? 'rgba(0,0,0,0.06)' : rgba(hexU, 0.06));
+
+    var html = '<div class="pass-card' + (isMono ? ' bw-mode' : '') + '" style="color:' + fg + ';">';
+    html += '<div class="pass-mark" style="color:' + markCol + ';">' + escapeHtml(mark) + '</div>';
+    html += '<div class="pass-inner">';
+    html += '<div class="pass-head"><span class="pass-logo" style="color:' + fg + ';">EONUN</span><span class="pass-title">' + escapeHtml(ti) + '</span></div>';
+    html += '<div class="pass-main"><div class="pass-name">' + escapeHtml(name) + '</div><div class="pass-role o-role">' + escapeHtml(role).replace(/\n/g, '<br>') + '</div></div>';
+    html += '<div class="pass-foot">';
+    html += '<div class="pass-meta"><div class="pass-id">NO. <span style="color:' + fg + ';">' + escapeHtml(id) + '</span></div><div class="pass-date">' + escapeHtml(date) + '</div><div class="pass-color"><span class="pass-swatch" style="background:' + accent + ';border-color:' + (isMono ? '#111' : 'rgba(255,255,255,0.3)') + ';"></span><span class="pass-hex" style="color:' + fg + ';">' + escapeHtml(hexTxt) + '</span></div></div>';
+    html += '<div class="pass-qr-wrap"><div class="pass-qr" style="border-color:' + (isMono ? '#111' : '') + ';">' + stampHtml + '</div><div class="pass-qr-tip" style="color:' + fg + ';">已验证</div></div>';
+    html += '</div>';
+    html += '</div>';
+    html += '<div class="ecard-sheen"></div>';
+    html += '</div>';
+    return html;
+  }
+
+  // ---------- 流光配色：卡片背面光晕 + 卡面扫光 ----------
+  function flowColors(th) {
+    var f1, f2;
+    if (th.isMaster) { f1 = '#C9A227'; f2 = '#7a5f10'; }
+    else if (th.isMono) { f1 = '#9a9a9a'; f2 = '#3f3f3f'; }
+    else {
+      var c = hexToHsl(th.hex);
+      f1 = th.hex;
+      f2 = hslToHex(c.h - 55, Math.min(c.s, 72), Math.min(c.l + 7, 62));
+    }
+    return { f1: f1, f2: f2 };
+  }
+
+  var ECARD = window.ECARD || {};
+
+  ECARD.html = function(info, fallbackId) {
+    if (!info) info = {};
+    if (!info.id && fallbackId) info = Object.assign({}, info, { id: fallbackId });
+    var th = themeFor(info);
+    var stamp = vstamp(th);
+    var type = info.type || 'cert';
+    var inner = '';
+    if (type === 'cert' || type === 'master') inner = htmlCert(info, stamp);
+    else if (type === 'pass') inner = htmlPass(info, stamp);
+    else inner = htmlOther(info, stamp);
+    var fc = flowColors(th);
+    return '<div class="ecard-host ' + (th.isMaster ? 'master' : '') + (th.isMono ? ' mono' : '') + '" style="--f1:' + fc.f1 + ';--f2:' + fc.f2 + ';">'
+      + '<div class="ecard-scale"><div class="ecard-glow"></div>' + inner + '</div></div>';
+  };
+
+  ECARD.mount = function(container, info, fallbackId) {
+    if (!container) return;
+    if (!info) info = {};
+    if (!info.id && fallbackId) info = Object.assign({}, info, { id: fallbackId });
+    var th = themeFor(info);
+    var type = info.type || 'cert';
+    container.innerHTML = ECARD.html(info);
+
+    // 应用主题色变量
+    var isCert = type === 'cert' || type === 'master';
+    var card = container.querySelector('.cert') || container.querySelector('.pass-card');
+    if (isCert && card) {
+      applyTheme(card, th.isMaster, th.hex);
+    }
+
+    // host 显式尺寸（ecard-scale 绝对定位，不占布局）；证书额外按容器宽度缩放
+    var scale = container.querySelector('.ecard-scale');
+    var host = container.querySelector('.ecard-host');
+    if (!scale || !host || !card) return;
+    if (isCert) {
+      var cardW = card.offsetWidth || 1122;
+      // 容器隐藏（display:none）时 clientWidth 为 0，依次回退父元素/视口宽度
+      var avail = container.clientWidth
+        || (container.parentElement && container.parentElement.clientWidth)
+        || ((window.innerWidth || 800) - 32);
+      var s = Math.min(1, avail / cardW);
+      scale.style.transform = 'scale(' + s + ')';
+      scale.style.width = cardW + 'px';
+      var cardH = card.offsetHeight || 794;
+      host.style.height = Math.round(cardH * s) + 'px';
+      host.style.width = Math.round(cardW * s) + 'px';
+    } else {
+      host.style.width = card.offsetWidth + 'px';
+      host.style.height = card.offsetHeight + 'px';
+    }
+  };
+
+  // ---------- 地铁站式进度轨道（verify 页与登记程序预览共用） ----------
+  // 机制：节点圆圈压在轨道线上，按 i/(N-1) 精确分布；填充条行进到当前节点圆心。
+  ECARD.progressHtml = function(nodes, current, info) {
+    if (!nodes || !nodes.length) return '';
+    var th = themeFor(info || {});
+    var fc = flowColors(th);
+    var n = nodes.length;
+    var cur = Math.max(0, Math.min(parseInt(current, 10) || 0, n - 1));
+    var ratio = n > 1 ? cur / (n - 1) : 1;
+    var pct = Math.round(ratio * 100);
+    var stops = '';
+    for (var i = 0; i < n; i++) {
+      var left = n > 1 ? (i / (n - 1) * 100) : 50;
+      var cls = i < cur ? 'done' : (i === cur ? 'current' : '');
+      stops += '<div class="metro-stop ' + cls + '" style="left:' + left + '%">'
+        + '<div class="metro-dot">' + (i < cur ? '✓' : (i + 1)) + '</div>'
+        + '<div class="metro-name">' + escapeHtml(nodes[i]) + '</div></div>';
+    }
+    return '<div class="metro" style="--m1:' + fc.f1 + ';--m2:' + fc.f2 + '">'
+      + '<div class="metro-top"><span class="metro-label">' + escapeHtml(nodes[cur]) + '</span><span class="metro-pct">' + pct + '%</span></div>'
+      + '<div class="metro-rail"><div class="metro-line"></div><div class="metro-fill" style="width:' + (ratio * 100) + '%"></div>'
+      + stops + '</div></div>';
+  };
+
+  window.ECARD = ECARD;
+})();
+
+function renderProgress(nodes, current, info) {
+  const c = document.getElementById('progressContainer');
+  if (!nodes || !nodes.length) { c.innerHTML = ''; return; }
+  c.innerHTML = '<div class="progress-section"><h3>' + t('prog_title') + '</h3>' + ECARD.progressHtml(nodes, current, info || {}) + '</div>';
+}
+function renderMessage(msg) {
+  const c = document.getElementById('messageContainer');
+  if (!msg || !msg.trim()) { c.innerHTML = ''; return; }
+  c.innerHTML = '<div class="message-section"><h3>' + t('msg_title') + '</h3><p>' + esc(msg).replace(/\n/g,'<br>') + '</p></div>';
+}
+
+/* ================= 统一名单逻辑（只读） ================= */
+let unifiedRegistry = new Map();
+const LS_KEY = 'eonun_registry_v2';
+
+function parseUnifiedRegistry(text) {
+  const map = new Map();
+  try {
+    const data = JSON.parse(text);
+    const entries = Array.isArray(data) ? data : (data.entries || []);
+    entries.forEach(e => {
+      if (e && e.id) {
+        const status = (e.status || 'inactive').toLowerCase();
+        map.set(e.id.toUpperCase(), {
+          name: e.name || '',
+          status: ['active', 'revoked'].includes(status) ? status : 'inactive',
+          note: e.note || '',
+          type: e.type || ''
+        });
+      }
+    });
+  } catch(err) {
+    // 解析失败返回空Map
+  }
+  return map;
+}
+function saveLS() {
+  const arr = [];
+  unifiedRegistry.forEach((e, id) => arr.push({id:id, name:e.name, status:e.status, note:e.note, type:e.type}));
+  try { localStorage.setItem(LS_KEY, JSON.stringify(arr)); } catch(e) {}
+}
+function loadLS() {
+  try {
+    const arr = JSON.parse(localStorage.getItem(LS_KEY) || '[]');
+    arr.forEach(e => unifiedRegistry.set(e.id.toUpperCase(), {name:e.name, status:e.status, note:e.note, type:e.type}));
+  } catch(e) {}
+}
+function importRegistry(input) {
+  const f = input.files[0];
+  if (!f) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    const imported = parseUnifiedRegistry(reader.result);
+    imported.forEach((e, id) => unifiedRegistry.set(id, e));   // 合并（导入优先）
+    saveLS(); renderRegistry();
+  };
+  reader.readAsText(f, 'utf-8');
+  input.value = '';
+}
+function renderRegistry() {
+  document.getElementById('regCount').textContent = unifiedRegistry.size
+    ? '已加载 ' + unifiedRegistry.size + ' 条记录' : '名单为空';
+  let html = '';
+  unifiedRegistry.forEach((e, id) => {
+    const stLabel = e.status === 'active' ? (LANG==='zh'?'已激活':'Active')
+                  : e.status === 'revoked' ? (LANG==='zh'?'已注销':'Revoked')
+                  : (LANG==='zh'?'未激活':'Inactive');
+    const stClass = e.status === 'active' ? 'ok' : e.status === 'revoked' ? 'bad' : '';
+    html += '<div class="entry">'
+      + '<span class="eid">' + esc(id) + '</span>'
+      + '<span class="ename">' + esc(e.name) + '</span>'
+      + (e.note ? '<span class="enote" title="' + esc(e.note) + '">' + esc(e.note) + '</span>' : '<span class="enote"></span>')
+      + '<span class="badge ' + stClass + '">' + stLabel + '</span>'
+      + '</div>';
+  });
+  document.getElementById('regList').innerHTML = html;
+}
+
+/* 管理模式约定：仅在本地副本（双击打开，file://）开放管理入口；
+   从网址访问的公开副本自动隐藏管理功能，只做验证。
+   说明：这是工作流约定而非安全边界——任何人另存页面到本地即可恢复管理，
+   但本地修改只影响本人；公众验证以你发布的页面为准。 */
+const IS_LOCAL = location.protocol === 'file:';
+function openAdmin(){
+  const p = document.getElementById('adminPanel');
+  p.classList.toggle('open');
+  if (p.classList.contains('open')) renderPubAdmin();
+}
+function closeAdmin(){ document.getElementById('adminPanel').classList.remove('open'); }
+function applyMode(){
+  if (IS_LOCAL) return;
+  const t = document.querySelector('.admin-toggle');
+  if (t) t.style.display = 'none';
+  document.getElementById('adminPanel').classList.remove('open');
+}
+
+function renderPubAdmin(){
+  const c = document.getElementById('pubCount'), l = document.getElementById('pubList');
+  if (!c) return;
+  const embedded = new Set(PUBLIC_KEYS.map(k => String(k).trim().toLowerCase()));
+  const pubs = allPubs();
+  c.textContent = '共 ' + pubs.length + ' 把公钥（内置 ' + PUBLIC_KEYS.length + ' + 本地 ' + localPubs.length + '）· 本地修改跨重启保留';
+  let html = '';
+  pubs.forEach(k => {
+    const isEmb = embedded.has(k);
+    html += '<div class="entry"><span class="eid">' + (isEmb ? '内置' : '本地') + '</span>'
+      + '<span class="enote" title="' + k + '">' + k.slice(0, 24) + '…</span>'
+      + (isEmb ? '<span class="badge ok">随页面分发</span>'
+               : '<span class="entry-actions"><button class="icon-btn" onclick="delPub(&quot;' + k + '&quot;)">删除</button></span>')
+      + '</div>';
+  });
+  l.innerHTML = html;
+}
+function importPubFile(input){
+  const f = input.files[0];
+  if (!f) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    let d;
+    try { d = JSON.parse(reader.result); } catch(e) { alert('不是有效的 JSON 文件。'); return; }
+    const pubs = [];
+    if (Array.isArray(d)) {
+      d.forEach(x => pubs.push(String(x)));                          // keys.json 格式：公钥数组
+    } else if (d && Array.isArray(d.keys)) {
+      d.keys.forEach(k => { if (k && k.pub) pubs.push(String(k.pub)); });  // 私钥备份格式：自动只取 pub
+    } else if (d && d.pub) {
+      pubs.push(String(d.pub));
+    }
+    let added = 0, skipped = 0;
+    pubs.forEach(p => {
+      const k = String(p).trim().toLowerCase();
+      if (!/^04[0-9a-f]{128}$/.test(k) || !ecPointFromHex(k) || allPubs().includes(k)) { skipped++; return; }
+      localPubs.push(k); added++;
+    });
+    savePubs(); renderPubAdmin();
+    alert('已导入 ' + added + ' 把公钥' + (skipped ? '（跳过 ' + skipped + ' 个无效/重复的）' : '') + '。\n\n说明：备份文件里的私钥字段被完全忽略，本页面绝不保存私钥。想让所有人信任这些公钥，请把它们放进 keys.json 上传到 GitHub。');
+  };
+  reader.readAsText(f, 'utf-8');
+  input.value = '';
+}
+
+function addPub(){
+  const k = document.getElementById('n-pub').value.trim().toLowerCase();
+  if (!/^04[0-9a-f]{128}$/.test(k)) { alert('格式不对：需要 04 开头的 130 位十六进制。'); return; }
+  if (!ecPointFromHex(k)) { alert('公钥不在曲线上，请检查是否复制完整。'); return; }
+  if (allPubs().includes(k)) { alert('这把公钥已在列表中。'); return; }
+  localPubs.push(k); savePubs(); renderPubAdmin();
+  document.getElementById('n-pub').value = '';
+  alert('已添加。此公钥仅保存在本浏览器；如需让所有人信任它，请把它追加进页面代码顶部的 PUBLIC_KEYS 后重新分发/上传页面。');
+}
+function delPub(k){
+  if (!confirm('从本地列表移除这把公钥？（内置公钥不可在此删除，需修改页面代码）')) return;
+  localPubs = localPubs.filter(x => String(x).trim().toLowerCase() !== k);
+  savePubs(); renderPubAdmin();
+}
+
+try { const sv = localStorage.getItem('eonun_lang_v1'); if (sv === 'en' || sv === 'zh') LANG = sv; } catch(e) {}
+loadLS();
+loadPubs();
+loadRemotePubs();
+loadRemoteRegistry();
+renderRegistry();
+renderPubAdmin();
+applyMode();
+applyLang();
+
+const h = location.hash.slice(1).trim();
+if (h) {
+  document.getElementById('payload').value = decodeURIComponent(h);
+  verify();
+}
+document.getElementById('payload').addEventListener('keydown', e => { if (e.key === 'Enter') verify(); });
+</script>
+
+</body>
+</html>
