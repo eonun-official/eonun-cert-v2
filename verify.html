@@ -170,11 +170,15 @@ function allPubs(){
 }
 /* 验签：返回通过验证的那把公钥（小写 hex），全部不通过返回 ''。
    v2 解密时优先用这把公钥做 ECDH —— 签名钥匙即加密钥匙。 */
-function ecVerifyAny(msg, sigHex) {
-  const h = sha256(msg.trim().toUpperCase());
-  if (!h) return '';
-  for (const pub of allPubs()) {
-    try { if (ecVerifyOne(pub, h, sigHex)) return pub; } catch(e) {}
+function ecVerifyAny(id, sigHex) {
+  const k = String(id || '').trim().toUpperCase();
+  const types = ['cert', 'master', 'pass', 'other', 'mono'];
+  for (const t of types) {
+    const h = sha256(k + '.' + t);
+    if (!h) continue;
+    for (const pub of allPubs()) {
+      try { if (ecVerifyOne(pub, h, sigHex)) return pub; } catch(e) {}
+    }
   }
   return '';
 }</script>
@@ -1078,8 +1082,9 @@ async function decryptMessage(sk, firstPub, sigSuffix) {
   try {
     if (!/^[0-9a-f]{64}$/.test(sk)) return null;
     const stuPub = bytesToHex(window.NOBLE_P256.getPublicKey(sk, false));
-    const fname = (await sha256HexText(stuPub.toLowerCase())) + (sigSuffix ? '_' + sigSuffix : '') + '.bin';
-    const resp = await fetch(fname, { cache: 'no-store' });
+    const base = await sha256HexText(stuPub.toLowerCase());
+    let resp = await fetch(base + (sigSuffix ? '_' + sigSuffix : '') + '.bin', { cache: 'no-store' });
+    if (!resp.ok && sigSuffix) resp = await fetch(base + '.bin', { cache: 'no-store' });   // 兼容无签名后缀的旧导出文件
     if (!resp.ok) return null;
     const data = new Uint8Array(await resp.arrayBuffer());
     if (data.length < 29) return null;   // 12 字节 IV + 16 字节校验码 + 至少 1 字节明文
