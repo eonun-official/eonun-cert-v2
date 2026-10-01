@@ -626,7 +626,7 @@ function ecVerifyAny(id, sigHex) {
   }
 
   /* ===== ecard extras: host / scale / verified-stamp / font ===== */
-  .ecard-host { width: 100%; position: relative; }
+  .ecard-host { width: 100%; position: relative; margin: 0 auto; }
   .ecard-scale { position: absolute; top: 0; left: 0; transform-origin: top left; }
   .ecard-host .cert, .ecard-host .pass-card { font-family: 'Avenir Next', Avenir, 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans SC', sans-serif; }
   .ecard-host .vstamp { width: 100%; height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; font-weight: 800; line-height: 1; }
@@ -1215,6 +1215,8 @@ function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
     var note = info.note || '';
     var lines = (info.benefits || '').split('\n').map(function(s){ return s.trim(); }).filter(Boolean);
     var isMaster = isMasterInfo(info);
+    var hexU = normHex(info.color);
+    var accent = isMaster ? '#C9A227' : hexU;
     var ori = info.ori === 'portrait' ? 'portrait' : '';
     var split = info.layout === 'extreme' && !ori ? 'split' : '';
 
@@ -1244,7 +1246,7 @@ function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
     }
     html += '<div class="cert-footer">';
     html += '<div class="sig-block"><div class="sig-line">' + escapeHtml(teacher) + '</div><div class="sig-role">课程讲师 · Course Instructor</div><div class="sig-date">颁发日期：' + escapeHtml(date) + '</div></div>';
-    html += '<div class="qr-block"><div class="qr-box">' + stampHtml + '</div><div class="qr-id">NO. ' + escapeHtml(id) + '<br><span style="font-size:9px;opacity:.7;">电子凭证</span></div><div class="qr-tip">已验证 VERIFIED</div></div>';
+    html += '<div class="qr-block"><div class="qr-box" style="background:transparent;border:1.5px solid ' + accent + ';box-shadow:none;">' + stampHtml + '</div><div class="qr-id">NO. ' + escapeHtml(id) + '<br><span style="font-size:9px;opacity:.7;">电子凭证</span></div><div class="qr-tip">已验证 VERIFIED</div></div>';
     html += '</div>';
     html += '</div>';
     html += '</div>';
@@ -1274,7 +1276,7 @@ function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
     html += '<div class="pass-main"><div class="pass-name">' + escapeHtml(name) + '</div><div class="pass-role">' + escapeHtml(role) + '</div></div>';
     html += '<div class="pass-foot">';
     html += '<div class="pass-meta"><div class="pass-id">NO. <span style="color:' + fg + ';">' + escapeHtml(id) + '</span></div><div class="pass-date">' + escapeHtml(date) + '</div><div class="pass-color"><span class="pass-swatch" style="background:' + accent + ';border-color:' + (isMono ? '#111' : 'rgba(255,255,255,0.3)') + ';"></span><span class="pass-hex" style="color:' + fg + ';">' + escapeHtml(hexTxt) + '</span></div></div>';
-    html += '<div class="pass-qr-wrap"><div class="pass-qr" style="border-color:' + (isMono ? '#111' : '') + ';">' + stampHtml + '</div><div class="pass-qr-tip" style="color:' + fg + ';">已验证</div></div>';
+    html += '<div class="pass-qr-wrap"><div class="pass-qr" style="background:transparent;border:1px solid ' + accent + ';">' + stampHtml + '</div><div class="pass-qr-tip" style="color:' + fg + ';">已验证</div></div>';
     html += '</div>';
     html += '</div>';
     html += '<div class="ecard-sheen"></div>';
@@ -1304,7 +1306,7 @@ function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
     html += '<div class="pass-main"><div class="pass-name">' + escapeHtml(name) + '</div><div class="pass-role o-role">' + escapeHtml(role).replace(/\n/g, '<br>') + '</div></div>';
     html += '<div class="pass-foot">';
     html += '<div class="pass-meta"><div class="pass-id">NO. <span style="color:' + fg + ';">' + escapeHtml(id) + '</span></div><div class="pass-date">' + escapeHtml(date) + '</div><div class="pass-color"><span class="pass-swatch" style="background:' + accent + ';border-color:' + (isMono ? '#111' : 'rgba(255,255,255,0.3)') + ';"></span><span class="pass-hex" style="color:' + fg + ';">' + escapeHtml(hexTxt) + '</span></div></div>';
-    html += '<div class="pass-qr-wrap"><div class="pass-qr" style="border-color:' + (isMono ? '#111' : '') + ';">' + stampHtml + '</div><div class="pass-qr-tip" style="color:' + fg + ';">已验证</div></div>';
+    html += '<div class="pass-qr-wrap"><div class="pass-qr" style="background:transparent;border:1px solid ' + accent + ';">' + stampHtml + '</div><div class="pass-qr-tip" style="color:' + fg + ';">已验证</div></div>';
     html += '</div>';
     html += '</div>';
     html += '<div class="ecard-sheen"></div>';
